@@ -3,6 +3,9 @@ mod error;
 mod handlers;
 mod router;
 mod state;
+mod services;
+mod model;
+mod middleware;
 
 use crate::config::Config;
 use crate::state::InnerState;
@@ -17,9 +20,17 @@ async fn main()
 
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
 
-    let config = Config::from_env().expect("Failed to load configuration");
+    let config = match Config::from_env() 
+    {
+        Ok(config) => config,
+        Err(e) => 
+        {
+            tracing::error!("❌ Erreur de configuration: {}", e);
+            std::process::exit(1); // On quitte proprement
+        }
+    };
 
-    let app_state = InnerState::new();
+    let app_state = InnerState::new(config.clone());
     let app = router::create_router(app_state);
 
     let addr = SocketAddr::from((config.host.parse::<Ipv4Addr>().unwrap(), config.port));

@@ -7,14 +7,16 @@ edition = "2024"
 [dependencies]
 # Le framework web principal
 axum = "0.8.4"
+axum-extra = { version = "0.10", features = ["cookie"] }
 
 # Le runtime asynchrone
-tokio = { version = "1.45.1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 
 # La tour de services et ses middlewares HTTP
 tower = { version = "0.5.2", features = ["full"] }
-tower-http = { version = "0.6.6", features = ["fs", "trace", "cors", "compression-gzip", "timeout"] }
+tower-http = { version = "0.6.6", features = ["trace", "cors", "compression-gzip", "timeout"] }
 
+jsonwebtoken = "9.3"
 
 # Logging structuré
 tracing = "0.1.41"
@@ -29,3 +31,8 @@ thiserror = "2.0.12"
 
 # Chargement des variables d'environnement depuis un fichier .env
 dotenvy = "0.15.7"
+
+# Client HTTP pour les appels externes
+reqwest = { version = "0.12", features = ["json"] }
+
+quick-xml = { version = "0.38.0", features = ["serialize"] }

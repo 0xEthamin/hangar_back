@@ -3,17 +3,17 @@ use axum::response::IntoResponse;
 
 use crate::error::AppError;
 
-pub async fn health_check_handler() -> impl IntoResponse 
+pub async fn health_check_handler() -> Result<impl IntoResponse, AppError>
 {
-    (StatusCode::OK, "OK")
+    Ok((StatusCode::OK, "OK"))
 }
 
-pub async fn error_check_handler() -> impl IntoResponse 
+pub async fn error_check_handler() -> Result<impl IntoResponse, AppError>
 {
-    AppError::InternalServerError.into_response()
+    Err::<(), AppError>(AppError::InternalServerError)
 }
 
-pub async fn not_found_handler() -> impl IntoResponse 
+pub async fn not_found_handler() ->  Result<impl IntoResponse, AppError> 
 {
-    AppError::NotFound("Test 404".to_string()).into_response()
+    Err::<(), AppError>(AppError::NotFound("Test 404".to_string()))
 }
