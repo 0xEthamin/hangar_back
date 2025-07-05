@@ -1,12 +1,13 @@
 use axum::
 {
-    extract::{MatchedPath, Query, State}, 
+    extract::{Query, State}, 
     response::{IntoResponse, Json}
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::{error::AppError, state::AppState};
 use crate::services::jwt::Claims;
@@ -19,10 +20,9 @@ pub struct AuthCallbackQuery
 
 pub async fn auth_callback_handler(State(state): State<AppState>, 
                                    Query(query): Query<AuthCallbackQuery>, 
-                                   jar: CookieJar,
-                                   matched_path: MatchedPath) -> Result<impl IntoResponse, AppError>
+                                   jar: CookieJar) -> Result<impl IntoResponse, AppError>
 {
-    let service = format!("{}{}", state.config.public_address, matched_path.as_str());
+    let service = format!("{}/auth/callback", state.config.public_address);
 
     let url = format!("{}?service={}&ticket={}", state.config.cas_validation_url, service, &query.ticket);
     let user = crate::services::auth_service::validate_ticket(&url, &state.http_client).await?;
@@ -30,6 +30,7 @@ pub async fn auth_callback_handler(State(state): State<AppState>,
     let token = crate::services::jwt::generate_jwt(
         &state.config.jwt_secret,
         &user.login,
+        &user.name,
         &user.email,
     )?;
 
@@ -51,6 +52,7 @@ pub async fn auth_callback_handler(State(state): State<AppState>,
                     "user": 
                     {
                         "login": user.login,
+                        "name": user.name,
                         "email": user.email
                     }
                 }
@@ -70,9 +72,25 @@ pub async fn get_current_user_handler(claims: Claims) -> impl IntoResponse
                 "user": 
                 {
                     "login": claims.sub,
-                    "email": claims.email
+                    "name": claims.name,
+                    "email": claims.email,
+                    
                 }
             }
         )
     )
+}
+
+
+pub async fn logout_handler(jar: CookieJar) -> Result<impl IntoResponse, AppError> 
+{
+    let cookie = Cookie::build(("auth_token", ""))
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .expires(OffsetDateTime::UNIX_EPOCH) // Expire dans le passé
+        .build();
+
+    Ok((jar.add(cookie), axum::http::StatusCode::OK))
 }

@@ -14,6 +14,7 @@ pub fn create_router(state: AppState) -> Router
 
     let protected_routes = Router::new()
         .route("/api/auth/me", get(handlers::auth_handler::get_current_user_handler))
+        .route("/api/auth/logout", get(handlers::auth_handler::logout_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth));
 
     Router::new()

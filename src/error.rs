@@ -1,7 +1,7 @@
 use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
 use serde_json::json;
 use thiserror::Error;
-use tracing::{error, warn, info};
+use tracing::{error, trace};
 
 #[derive(Debug, Error)]
 pub enum AppError 
@@ -50,7 +50,7 @@ impl IntoResponse for AppError
 
             AppError::Unauthorized(message) => 
             {
-                warn!("--> REQUÊTE NON AUTORISÉE (401): {}", message);
+                trace!("--> NON AUTORISÉ (401): {}", message);
                 (
                     StatusCode::UNAUTHORIZED,
                     format!("Non autorisé: {}", message),
@@ -59,7 +59,7 @@ impl IntoResponse for AppError
 
             AppError::NotFound(ressource) =>
             {
-                info!("--> RESSOURCE NON TROUVÉE (404): {}", ressource);
+                trace!("--> RESSOURCE NON TROUVÉE (404): {}", ressource);
                 (
                     StatusCode::NOT_FOUND,
                     format!("Ressource non trouvée: {}", ressource),

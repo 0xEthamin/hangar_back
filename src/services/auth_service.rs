@@ -23,6 +23,9 @@ struct CasAttributes
     #[serde(rename = "mail", alias = "cas:mail")]
     mail: Option<String>,
 
+    #[serde(rename = "prenom", alias = "cas:prenom")]
+    prenom: Option<String>,
+
     #[serde(rename = "login", alias = "cas:login")]
     login: Option<String>,
 }
@@ -50,10 +53,13 @@ pub async fn validate_ticket(url: &str, client: &reqwest::Client)  -> Result<Use
         .ok_or_else(|| { AppError::Unauthorized("Missing attributes".to_string()) })?;
 
     let email = attributes.mail
-        .ok_or_else(|| { AppError::Unauthorized("Missing mail".to_string()) })?;
+        .ok_or_else(|| { error!("Missing mail in CAS"); AppError::Unauthorized("Missing mail".to_string()) })?;
 
     let login = attributes.login
-        .ok_or_else(|| { AppError::Unauthorized("Missing login".to_string()) })?;
+        .ok_or_else(|| { error!("Missing login in CAS"); AppError::Unauthorized("Missing login".to_string()) })?;
 
-    Ok(User { email, login })
+    let prenom = attributes.prenom
+        .ok_or_else(|| { error!("Missing prenom in CAS"); AppError::Unauthorized("Missing prenom".to_string()) })?;
+
+    Ok(User { email, name : prenom, login })
 }

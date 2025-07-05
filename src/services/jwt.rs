@@ -10,16 +10,18 @@ const EXPIRATION_SECONDS: u64 = 60 * 60; // 1 heure
 pub struct Claims 
 {
     pub sub: String,
+    pub name: String,
     pub email: String,
     pub exp: usize,
 }
 
-pub fn generate_jwt(secret: &str, login: &str, email: &str) -> Result<String, AppError> 
+pub fn generate_jwt(secret: &str, login: &str, name: &str, email: &str) -> Result<String, AppError> 
 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let claims = Claims 
     {
         sub: login.to_string(),
+        name: name.to_string(),
         email: email.to_string(),
         exp: (now + EXPIRATION_SECONDS) as usize,
     };
