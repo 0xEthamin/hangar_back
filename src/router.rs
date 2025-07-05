@@ -13,7 +13,7 @@ pub fn create_router(state: AppState) -> Router
         .route("/api/auth/callback", get(handlers::auth_handler::auth_callback_handler));
 
     let protected_routes = Router::new()
-        .route("/api/protected", get(handlers::auth_handler::protected_test))
+        .route("/api/auth/me", get(handlers::auth_handler::get_current_user_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth));
 
     Router::new()

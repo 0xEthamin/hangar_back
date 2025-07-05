@@ -60,20 +60,19 @@ pub async fn auth_callback_handler(State(state): State<AppState>,
 
 }
 
-pub async fn protected_test(claims: Claims) -> Result<impl IntoResponse, AppError>
+pub async fn get_current_user_handler(claims: Claims) -> impl IntoResponse 
 {
-    Ok
+    Json
     (
-        Json
+        json!
         (
-            json!
-            (
+            {
+                "user": 
                 {
-                    "message": format!("Bienvenue sur votre profil, {}", claims.sub),
-                    "email": claims.email,
-                    "expires_at": claims.exp
+                    "login": claims.sub,
+                    "email": claims.email
                 }
-            )
+            }
         )
     )
 }
