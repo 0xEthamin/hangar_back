@@ -25,10 +25,12 @@ pub async fn auth_callback_handler(State(state): State<AppState>,
     let service = format!("{}/auth/callback", state.config.public_address);
 
     let url = format!("{}?service={}&ticket={}", state.config.cas_validation_url, service, &query.ticket);
+    tracing::debug!("Validating CAS ticket at URL: {}", url);
     let user = crate::services::auth_service::validate_ticket(&url, &state.http_client).await?;
 
     let token = crate::services::jwt::generate_jwt(
         &state.config.jwt_secret,
+        state.config.jwt_expiration_seconds,
         &user.login,
         &user.name,
         &user.email,

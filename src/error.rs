@@ -41,28 +41,28 @@ impl IntoResponse for AppError
             
             AppError::InternalServerError | AppError::ExternalServiceError(_) | AppError::ParsingError(_) => 
             {
-                error!("--> ERREUR SERVEUR (5xx): {:?}", self); 
+                error!("--> SERVER ERROR (5xx): {:?}", self); 
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Une erreur interne est survenue".to_string(),
+                    "An internal error has occurred".to_string(),
                 )
             }
 
             AppError::Unauthorized(message) => 
             {
-                trace!("--> NON AUTORISÉ (401): {}", message);
+                trace!("--> NOT AUTHORIZED (401): {}", message);
                 (
                     StatusCode::UNAUTHORIZED,
-                    format!("Non autorisé: {}", message),
+                    format!("not authorized: {}", message),
                 )
             }
 
             AppError::NotFound(ressource) =>
             {
-                trace!("--> RESSOURCE NON TROUVÉE (404): {}", ressource);
+                trace!("--> RESOURCE NOT FOUND (404): {}", ressource);
                 (
                     StatusCode::NOT_FOUND,
-                    format!("Ressource non trouvée: {}", ressource),
+                    format!("Resource not found: {}", ressource),
                 )
             }
         };

@@ -15,5 +15,5 @@ pub async fn error_check_handler() -> Result<impl IntoResponse, AppError>
 
 pub async fn not_found_handler() ->  Result<impl IntoResponse, AppError> 
 {
-    Err::<(), AppError>(AppError::NotFound("Test 404".to_string()))
+    Err::<(), AppError>(AppError::NotFound("404".to_string()))
 }

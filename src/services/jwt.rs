@@ -4,8 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
 
-const EXPIRATION_SECONDS: u64 = 60 * 60; // 1 heure
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims 
 {
@@ -15,7 +13,7 @@ pub struct Claims
     pub exp: usize,
 }
 
-pub fn generate_jwt(secret: &str, login: &str, name: &str, email: &str) -> Result<String, AppError> 
+pub fn generate_jwt(secret: &str, jwt_expiration_seconds : u64, login: &str, name: &str, email: &str) -> Result<String, AppError> 
 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let claims = Claims 
@@ -23,7 +21,7 @@ pub fn generate_jwt(secret: &str, login: &str, name: &str, email: &str) -> Resul
         sub: login.to_string(),
         name: name.to_string(),
         email: email.to_string(),
-        exp: (now + EXPIRATION_SECONDS) as usize,
+        exp: (now + jwt_expiration_seconds) as usize,
     };
 
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).map_err(|_| AppError::InternalServerError)

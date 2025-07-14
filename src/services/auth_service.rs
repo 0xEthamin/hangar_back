@@ -1,6 +1,5 @@
 use serde::Deserialize;
 use tracing::error;
-
 use crate::error::AppError;
 use crate::model::user::User;
 
@@ -33,7 +32,6 @@ struct CasAttributes
 
 pub async fn validate_ticket(url: &str, client: &reqwest::Client)  -> Result<User, AppError>
 {
-    
 
     let response = client.get(url).send().await?;
     
@@ -43,6 +41,8 @@ pub async fn validate_ticket(url: &str, client: &reqwest::Client)  -> Result<Use
     }
 
     let xml_body = response.text().await?;
+
+    tracing::debug!("CAS response body: {}", xml_body);
 
     let service_response: ServiceResponse = quick_xml::de::from_str(&xml_body)?;
 
