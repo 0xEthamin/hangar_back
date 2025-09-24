@@ -1,0 +1,18 @@
+services:
+  hangar-postgres:
+      container_name: hangar-postgres
+      image: postgres
+      restart: unless-stopped
+      ports:
+        - "5432:5432"
+      volumes:
+        - ./postgresql_data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD", "pg_isready", "-d", "hangar_db", "-U", "hanger_user"]
+        interval: 30s
+        timeout: 20s
+        retries: 3
+      environment:
+        POSTGRES_USER: 'hangar_user'
+        POSTGRES_PASSWORD: 'hangar_pass'
+        POSTGRES_DB: 'hangar_db'

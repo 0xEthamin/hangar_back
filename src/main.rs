@@ -9,7 +9,9 @@ mod middleware;
 
 use crate::config::Config;
 use crate::state::InnerState;
+
 use std::net::{SocketAddr, Ipv4Addr};
+use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -30,9 +32,42 @@ async fn main()
         }
     };
 
+    let db_pool = match PgPoolOptions::new().max_connections(config.db_max_connections).connect(&config.db_url).await
+    {
+        Ok(pool) => 
+        {
+            info!("✅ Database connection pool created successfully.");
+            pool
+        }
+        Err(e) => 
+        {
+            tracing::error!("❌ Failed to create database connection pool: {}", e);
+            std::process::exit(1);
+        }
+    };
+    
+    info!("🚀 Applying database migrations...");
+    match sqlx::migrate!("./migrations").run(&db_pool).await 
+    {
+        Ok(_) => info!("✅ Database migrations applied successfully."),
+        Err(e) => 
+        {
+            tracing::error!("❌ Failed to apply database migrations: {}", e);
+            std::process::exit(1);
+        }
+    }
 
+    let docker_client = match bollard::Docker::connect_with_local_defaults() 
+    {
+        Ok(client) => client,
+        Err(e) => 
+        {
+            tracing::error!("❌ Docker connection error: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    let app_state = InnerState::new(config.clone());
+    let app_state = InnerState::new(config.clone(), docker_client, db_pool);
     let app = router::create_router(app_state);
 
     let addr = SocketAddr::from((config.host.parse::<Ipv4Addr>().unwrap(), config.port));

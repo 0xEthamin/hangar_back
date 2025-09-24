@@ -10,32 +10,35 @@ axum = "0.8.4"
 axum-extra = { version = "0.10", features = ["cookie"] }
 
 # Le runtime asynchrone
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "process"] }
+futures = "0.3"
 
 # La tour de services et ses middlewares HTTP
-tower = { version = "0.5.2", features = ["full"] }
-tower-http = { version = "0.6.6", features = ["trace", "cors", "compression-gzip", "timeout"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "timeout"] }
 
 jsonwebtoken = "9.3"
 
 # Logging structuré
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Sérialisation / Désérialisation
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # Gestion des erreurs
-thiserror = "2.0.12"
+thiserror = "2.0"
 
 # Chargement des variables d'environnement depuis un fichier .env
-dotenvy = "0.15.7"
+dotenvy = "0.15"
 
 # Client HTTP pour les appels externes
 reqwest = { version = "0.12", features = ["json"] }
 
-quick-xml = { version = "0.38.0", features = ["serialize"] }
-time = "0.3.41"
+quick-xml = { version = "0.38", features = ["serialize"] }
+time = { version = "0.3", features = ["serde"] }
 
 bollard = "0.19"
+
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "time", "json"] }

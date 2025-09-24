@@ -20,6 +20,10 @@ pub enum AppError
 
     #[error("Error parsing response")]
     ParsingError(#[from] quick_xml::DeError),
+
+    #[error("Bad Request: {0}")]
+    BadRequest(String),
+
 }
 
 #[derive(Debug, Error)]
@@ -63,6 +67,15 @@ impl IntoResponse for AppError
                 (
                     StatusCode::NOT_FOUND,
                     format!("Resource not found: {}", ressource),
+                )
+            }
+
+            AppError::BadRequest(message) =>
+            {
+                trace!("--> BAD REQUEST (400): {}", message);
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Bad request: {}", message),
                 )
             }
         };
