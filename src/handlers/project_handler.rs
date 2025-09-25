@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Json}};
+use axum::{extract::{Path, State}, http::StatusCode, response::{IntoResponse, Json}};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -120,3 +120,79 @@ pub async fn deploy_project_handler(
         )
     ))
 }
+
+pub async fn purge_project_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = claims.sub;
+    info!("User '{}' initiated purge for project ID: {}", user_login, project_id);
+
+    let project = match project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &user_login).await? 
+    {
+        Some(p) => p,
+        None => 
+        {
+            warn!("Purge failed: Project ID {} not found or not owned by user '{}'.", project_id, user_login);
+            return Err(AppError::NotFound(format!("Project with ID {} not found.", project_id)));
+        }
+    };
+    
+    info!("Ownership confirmed. Proceeding with purge for project '{}' (ID: {})", project.name, project.id);
+
+    // Le reste de la logique est identique
+    docker_service::remove_container(&state.docker_client, &project.container_id).await?;
+    docker_service::remove_image(&state.docker_client, &project.image_url).await?;
+    project_service::delete_project_by_id(&state.db_pool, project.id).await?;
+
+    info!("Successfully purged project '{}' for user '{}'.", project.name, user_login);
+
+    Ok(
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "message": "Project purged successfully."
+            })),
+        )
+    )
+}
+
+pub async fn list_owned_projects_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = claims.sub;
+    info!("Fetching owned projects for user '{}'", user_login);
+
+    let projects = project_service::get_projects_by_owner(&state.db_pool, &user_login).await?;
+
+    Ok(
+        (
+            StatusCode::OK,
+            Json(json!({ "projects": projects })),
+        )
+    )
+}
+
+pub async fn list_participating_projects_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = claims.sub;
+    info!("Fetching projects where user '{}' is a participant", user_login);
+
+    let projects = project_service::get_participating_projects(&state.db_pool, &user_login).await?;
+
+    Ok(
+        (
+            StatusCode::OK,
+            Json(json!({ "projects": projects })),
+        )
+    )
+}
+

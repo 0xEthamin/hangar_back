@@ -1,5 +1,5 @@
 use crate::{handlers, state::AppState, middleware};
-use axum::{error_handling::HandleErrorLayer, http::StatusCode, middleware as axum_middleware, routing::{get, post}, BoxError, Router};
+use axum::{error_handling::HandleErrorLayer, http::StatusCode, middleware as axum_middleware, routing::{delete, get, post}, BoxError, Router};
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use std::time::Duration;
@@ -30,11 +30,14 @@ pub fn create_router(state: AppState) -> Router
     let protected_routes = Router::new()
         .route("/api/auth/me", get(handlers::auth_handler::get_current_user_handler))
         .route("/api/auth/logout", get(handlers::auth_handler::logout_handler))
+        .route("/api/projects/owned", get(handlers::project_handler::list_owned_projects_handler))
+        .route("/api/projects/participations", get(handlers::project_handler::list_participating_projects_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(common_layer.clone());
 
     let long_running_protected_routes = Router::new()
         .route("/api/projects/deploy", post(handlers::project_handler::deploy_project_handler))
+        .route("/api/projects/{project_id}", delete(handlers::project_handler::purge_project_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(long_running_layer);
 

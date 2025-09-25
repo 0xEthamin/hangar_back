@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 #[tokio::main]
-async fn main() 
+async fn main()
 {
     dotenvy::dotenv().ok();
 

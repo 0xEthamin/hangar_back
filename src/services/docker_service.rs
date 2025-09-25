@@ -1,3 +1,4 @@
+use bollard::secret::ResourcesUlimits;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::
@@ -6,9 +7,9 @@ use bollard::query_parameters::
     StopContainerOptions, RemoveImageOptions
 };
 use futures::stream::StreamExt;
+use tokio::process::Command;
 use std::collections::HashMap;
 use std::process::Stdio;
-use tokio::process::Command;
 use tracing::{error, info, warn};
 
 use crate::error::AppError;
@@ -89,7 +90,25 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
     {
         memory: Some(config.container_memory_mb * 1024 * 1024),
         cpu_quota: Some(config.container_cpu_quota),
-        network_mode: Some(config.docker_network.clone()),
+        //network_mode: Some(config.docker_network.clone()),
+        security_opt: Some(vec![
+            "no-new-privileges:true".to_string(),
+            "apparmor:docker-default".to_string()
+        ]),
+        readonly_rootfs: Some(false),
+        privileged: Some(false),
+        pids_limit: Some(256),
+        ulimits: Some(vec![
+            ResourcesUlimits { name: Some("nofile".to_string()), soft: Some(1024), hard: Some(2048) },
+            ResourcesUlimits { name: Some("nproc".to_string()), soft: Some(64), hard: Some(128) }
+        ]),
+        
+        // Montages sécurisés
+        tmpfs: Some(HashMap::from([
+            ("/tmp".to_string(), "rw,noexec,nosuid,size=100m".to_string())
+        ])),
+        oom_kill_disable: Some(false),
+        memory_swappiness: Some(0),
         ..Default::default()
     };
 
@@ -181,7 +200,7 @@ pub async fn remove_container(docker: &Docker, container_name: &str) -> Result<(
 
 pub async fn remove_image(docker: &Docker, image_url: &str) -> Result<(), AppError>
 {
-    warn!("Rollback: Attempting to remove image '{}' after a failed step.", image_url);
+    info!("Attempting to remove image: {}", image_url);
 
     let options = Some(RemoveImageOptions 
     {

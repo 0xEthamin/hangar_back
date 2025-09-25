@@ -13,7 +13,7 @@ pub struct Config
     pub cas_validation_url: String,
     pub app_prefix: String,
     pub app_domain_suffix: String,
-    pub docker_network: String,
+    pub _docker_network: String,
     pub traefik_entrypoint: String,
     pub traefik_cert_resolver: String,
     pub container_memory_mb: i64,
@@ -56,7 +56,7 @@ impl Config
 
         let app_prefix = std::env::var("APP_PREFIX").unwrap_or_else(|_| "hangar".to_string());
         let app_domain_suffix = std::env::var("APP_DOMAIN_SUFFIX").unwrap_or_else(|_| "localhost".to_string());
-        let docker_network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "traefik-net".to_string());
+        let _docker_network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "traefik-net".to_string());
         let traefik_entrypoint = std::env::var("DOCKER_TRAEFIK_ENTRYPOINT").unwrap_or_else(|_| "websecure".to_string());
         let traefik_cert_resolver = std::env::var("DOCKER_TRAEFIK_CERTRESOLVER").unwrap_or_else(|_| "myresolver".to_string());
         let grype_fail_on_severity = std::env::var("GRYPE_FAIL_ON_SEVERITY").unwrap_or_else(|_| "high".to_string());
@@ -87,7 +87,7 @@ impl Config
             cas_validation_url,
             app_prefix,
             app_domain_suffix,
-            docker_network,
+            _docker_network,
             traefik_entrypoint,
             traefik_cert_resolver,
             container_memory_mb,
