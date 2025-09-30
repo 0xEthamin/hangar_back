@@ -1,12 +1,16 @@
+use std::collections::HashSet;
+
 use axum::{extract::{Path, State}, http::StatusCode, response::{IntoResponse, Json}};
+use bollard::Docker;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info, warn};
 use crate::
 {
-    error::AppError, 
+    error::{AppError, ProjectErrorCode}, 
     services::{docker_service, jwt::Claims, project_service, validation_service}, 
-    state::AppState
+    state::AppState,
+    model::project::ProjectDetailsResponse
 };
 
 #[derive(Deserialize)]
@@ -14,6 +18,28 @@ pub struct DeployPayload
 {
     project_name: String,
     image_url: String,
+    participants: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectAction 
+{
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ProjectAction 
+{
+    async fn execute(self, docker: Docker, container_name: String) -> Result<(), AppError> 
+    {
+        match self 
+        {
+            ProjectAction::Start   => docker_service::start_container_by_name(&docker, &container_name).await,
+            ProjectAction::Stop    => docker_service::stop_container_by_name(&docker, &container_name).await,
+            ProjectAction::Restart => docker_service::restart_container_by_name(&docker, &container_name).await,
+        }
+    }
 }
 
 pub async fn deploy_project_handler(
@@ -27,13 +53,20 @@ pub async fn deploy_project_handler(
 
     let user_login = claims.sub;
 
-    if project_service::check_owner_exists(&state.db_pool, &user_login).await? 
+    let participants: HashSet<String> = payload.participants.into_iter().collect();
+    if participants.contains(&user_login) 
     {
-        return Err(AppError::BadRequest("You already own a project. Only one project per user is allowed.".to_string()));
+        return Err(AppError::BadRequest("The owner cannot be a participant.".to_string()));
     }
-    if project_service::check_project_name_exists(&state.db_pool, &payload.project_name).await? 
+    let final_participants: Vec<String> = participants.into_iter().collect();
+
+    if project_service::check_owner_exists(&state.db_pool, &user_login).await?
     {
-        return Err(AppError::BadRequest(format!("Project name '{}' is already taken.", payload.project_name)));
+        return Err(ProjectErrorCode::OwnerAlreadyExists.into());
+    }
+    if project_service::check_project_name_exists(&state.db_pool, &payload.project_name).await?
+    {
+        return Err(ProjectErrorCode::ProjectNameTaken.into());
     }
 
     docker_service::pull_image(&state.docker_client, &payload.image_url).await?;
@@ -82,6 +115,7 @@ pub async fn deploy_project_handler(
         {
             warn!("Failed to create project in DB, rolling back container and image...");
 
+            tx.rollback().await.map_err(|_| AppError::InternalServerError)?;
             let docker_client = state.docker_client.clone();
             let image_url = payload.image_url.clone();
 
@@ -100,6 +134,29 @@ pub async fn deploy_project_handler(
             return Err(db_error);
         }
     };
+
+    if let Err(e) = project_service::add_project_participants(&mut tx, new_project.id, &final_participants).await
+    {
+        warn!("Failed to add participants, rolling back container and image...");
+        tx.rollback().await.map_err(|_| AppError::InternalServerError)?;
+
+        let docker_client = state.docker_client.clone();
+        let image_url = payload.image_url.clone();
+        let container_id = container_id.clone();
+
+        tokio::spawn(async move 
+        {
+            if let Err(e) = docker_service::remove_container(&docker_client, &container_id).await 
+            {
+                error!("Participant Rollback: Failed to remove container {}: {}", container_id, e);
+            }
+            if let Err(e) = docker_service::remove_image(&docker_client, &image_url).await
+            {
+                error!("Participant Rollback: Failed to remove image {}: {}", image_url, e);
+            }
+        });
+        return Err(e);
+    }
 
     tx.commit().await.map_err(|_| AppError::InternalServerError)?;
     
@@ -196,3 +253,95 @@ pub async fn list_participating_projects_handler(
     )
 }
 
+pub async fn get_project_details_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = claims.sub;
+    info!("User '{}' fetching details for project ID: {}", user_login, project_id);
+
+    match project_service::get_project_by_id_for_user(&state.db_pool, project_id, &user_login).await? 
+    {
+        Some(project) => 
+        {
+            let participants = project_service::get_project_participants(&state.db_pool, project.id).await?;
+
+            let response = ProjectDetailsResponse 
+            {
+                project,
+                participants,
+            };
+
+            Ok((
+                StatusCode::OK,
+                Json(json!({ "project": response })),
+            ))
+        },
+        None => 
+        {
+            warn!("Access denied or not found for project ID {} by user '{}'.", project_id, user_login);
+            Err(AppError::NotFound(format!("Project with ID {} not found or you don't have access.", project_id)))
+        }
+    }
+}
+
+pub async fn get_project_status_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub).await?
+        .ok_or_else(|| AppError::NotFound("Project not found or access denied.".to_string()))?;
+
+    let container_name = format!("{}-{}", &state.config.app_prefix, project.name);
+    let status = docker_service::get_container_status(&state.docker_client, &container_name).await?;
+
+    Ok(Json(json!({ "status": status.and_then(|s| s.status) })))
+}
+
+async fn project_control_handler(
+    state: AppState,
+    claims: Claims,
+    project_id: i32,
+    action: ProjectAction,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool,project_id, &claims.sub).await?
+    .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
+
+    let container_name = format!("{}-{}", &state.config.app_prefix, project.name);
+
+    action.execute(state.docker_client.clone(), container_name).await?;
+
+    Ok(StatusCode::OK)
+}
+
+pub async fn start_project_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    project_control_handler(state, claims, project_id, ProjectAction::Start).await
+}
+
+pub async fn stop_project_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    project_control_handler(state, claims, project_id, ProjectAction::Stop).await
+}
+
+pub async fn restart_project_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    project_control_handler(state, claims, project_id, ProjectAction::Restart).await
+}

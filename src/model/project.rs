@@ -9,5 +9,14 @@ pub struct Project
     pub owner: String,
     pub image_url: String,
     pub container_id: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectDetailsResponse 
+{
+    #[serde(flatten)]
+    pub project: Project,
+    pub participants: Vec<String>,
 }

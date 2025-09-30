@@ -1,10 +1,9 @@
-use bollard::secret::ResourcesUlimits;
+use bollard::secret::{ContainerState, ResourcesUlimits};
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::
 {
-    CreateContainerOptionsBuilder, CreateImageOptions, RemoveContainerOptions, StartContainerOptions,
-    StopContainerOptions, RemoveImageOptions
+    CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, RemoveContainerOptions, RemoveImageOptions, RestartContainerOptions, StartContainerOptions, StopContainerOptions
 };
 use futures::stream::StreamExt;
 use tokio::process::Command;
@@ -12,7 +11,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tracing::{error, info, warn};
 
-use crate::error::AppError;
+use crate::error::{AppError, ProjectErrorCode};
 
 pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError> 
 {
@@ -38,7 +37,7 @@ pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError
             Err(e) => 
             {
                 error!("Failed to pull image '{}': {}", image_url, e);
-                return Err(AppError::BadRequest(format!("Failed to pull image: {}", e)));
+                return Err(ProjectErrorCode::ImagePullFailed.into());
             }
         }
     }
@@ -68,13 +67,8 @@ pub async fn scan_image_with_grype(image_url: &str, config: &crate::config::Conf
     if !output.status.success() 
     {
         warn!("Grype found vulnerabilities in image '{}'", image_url);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let error_message = format!(
-            "Image scan failed. Grype found high severity vulnerabilities.\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
-            stdout, stderr
-        );
-        return Err(AppError::BadRequest(error_message));
+        let report = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(ProjectErrorCode::ImageScanFailed(report).into());
     }
 
     info!("Grype scan passed for image '{}'.", image_url);
@@ -90,7 +84,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
     {
         memory: Some(config.container_memory_mb * 1024 * 1024),
         cpu_quota: Some(config.container_cpu_quota),
-        //network_mode: Some(config.docker_network.clone()),
+        network_mode: Some(config.docker_network.clone()),
         security_opt: Some(vec![
             "no-new-privileges:true".to_string(),
             "apparmor:docker-default".to_string()
@@ -133,7 +127,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
     let response = docker.create_container(options, config).await.map_err(|e| 
     {
         error!("Failed to create container '{}': {}", container_name, e);
-        AppError::InternalServerError
+        ProjectErrorCode::ContainerCreationFailed
     })?;
 
     docker.start_container(&container_name, None::<StartContainerOptions>).await.map_err(|e| 
@@ -156,7 +150,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
             }
         });
         
-        AppError::InternalServerError
+        ProjectErrorCode::ContainerCreationFailed
     })?;
 
     info!("Container '{}' created and started with ID: {}", container_name, response.id);
@@ -217,4 +211,48 @@ pub async fn remove_image(docker: &Docker, image_url: &str) -> Result<(), AppErr
         info!("Image {} successfully removed", image_url);
         Ok(())
     }
+}
+
+pub async fn get_container_status(docker: &Docker, container_name: &str) -> Result<Option<ContainerState>, AppError> 
+{
+    match docker.inspect_container(container_name, None::<InspectContainerOptions>).await 
+    {
+        Ok(details) => Ok(details.state),
+        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 => 
+        {
+            Ok(None)
+        },
+        Err(e) => 
+        {
+            error!("Failed to inspect container '{}': {}", container_name, e);
+            Err(AppError::InternalServerError)
+        }
+    }
+}
+
+pub async fn start_container_by_name(docker: &Docker, container_name: &str) -> Result<(), AppError> 
+{
+    docker.start_container(container_name, None::<StartContainerOptions>).await.map_err(|e| 
+    {
+        error!("Failed to start container '{}': {}", container_name, e);
+        AppError::InternalServerError
+    })
+}
+
+pub async fn stop_container_by_name(docker: &Docker, container_name: &str) -> Result<(), AppError> 
+{
+    docker.stop_container(container_name, None::<StopContainerOptions>).await.map_err(|e| 
+    {
+        error!("Failed to stop container '{}': {}", container_name, e);
+        AppError::InternalServerError
+    })
+}
+
+pub async fn restart_container_by_name(docker: &Docker, container_name: &str) -> Result<(), AppError>
+{
+    docker.restart_container(container_name, None::<RestartContainerOptions>).await.map_err(|e| 
+    {
+        error!("Failed to restart container '{}': {}", container_name, e);
+        AppError::InternalServerError
+    })
 }
