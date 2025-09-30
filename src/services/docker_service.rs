@@ -1,4 +1,4 @@
-use bollard::secret::{ContainerState, ResourcesUlimits};
+use bollard::secret::{ContainerState, ResourcesUlimits, RestartPolicy};
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::
@@ -82,6 +82,12 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
 
     let host_config = HostConfig 
     {
+        restart_policy: Some(RestartPolicy 
+        {
+            name: Some(bollard::secret::RestartPolicyNameEnum::UNLESS_STOPPED),
+            maximum_retry_count: None,
+        }),
+
         memory: Some(config.container_memory_mb * 1024 * 1024),
         cpu_quota: Some(config.container_cpu_quota),
         network_mode: Some(config.docker_network.clone()),
