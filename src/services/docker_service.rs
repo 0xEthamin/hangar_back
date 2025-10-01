@@ -1,17 +1,18 @@
-use bollard::secret::{ContainerState, ResourcesUlimits, RestartPolicy};
+use bollard::secret::{ContainerState, ContainerStatsResponse, ResourcesUlimits, RestartPolicy};
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::
 {
-    CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, RemoveContainerOptions, RemoveImageOptions, RestartContainerOptions, StartContainerOptions, StopContainerOptions
+    CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, LogsOptions, RemoveContainerOptions, RemoveImageOptions, RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions
 };
 use futures::stream::StreamExt;
 use tokio::process::Command;
 use std::collections::HashMap;
 use std::process::Stdio;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, ProjectErrorCode};
+use crate::model::project::ProjectMetrics;
 
 pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError> 
 {
@@ -261,4 +262,127 @@ pub async fn restart_container_by_name(docker: &Docker, container_name: &str) ->
         error!("Failed to restart container '{}': {}", container_name, e);
         AppError::InternalServerError
     })
+}
+
+pub async fn get_container_logs(docker: &Docker, container_name: &str, tail: &str) -> Result<String, AppError> 
+{
+    info!("Fetching logs for container '{}' with tail '{}'", container_name, tail);
+
+    let options = Some(LogsOptions 
+    {
+        stdout: true,
+        stderr: true,
+        tail: tail.to_string(),
+        timestamps: true,
+        ..Default::default()
+    });
+
+    let mut stream = docker.logs(container_name, options);
+
+    let mut log_entries = Vec::new();
+    while let Some(log_result) = stream.next().await 
+    {
+        match log_result 
+        {
+            Ok(log_output) => log_entries.push(log_output.to_string()),
+            Err(e) => 
+            {
+                error!("Error streaming logs for container '{}': {}", container_name, e);
+            }
+        }
+    }
+
+    Ok(log_entries.join(""))
+}
+
+pub async fn get_container_metrics(docker: &Docker, container_name: &str) -> Result<ProjectMetrics, AppError> 
+{
+    let mut stream = docker.stats(container_name, Some(StatsOptions 
+    { 
+        stream: false, 
+        ..Default::default() 
+    }));
+
+    if let Some(stats_result) = stream.next().await 
+    {
+        match stats_result 
+        {
+            Ok(stats) => 
+            {
+                debug!("Received stats for container '{}': {:?}", container_name, stats);
+                
+                let cpu_usage = calculate_cpu_percent(&stats);
+                let (memory_usage, memory_limit) = calculate_memory(&stats);
+
+                Ok(ProjectMetrics 
+                {
+                    cpu_usage,
+                    memory_usage: memory_usage as f64,
+                    memory_limit: memory_limit as f64,
+                })
+            }
+            Err(e) => 
+            {
+                error!("Failed to get stats for container '{}': {}", container_name, e);
+                Err(AppError::InternalServerError)
+            }
+        }
+    } 
+    else 
+    {
+        Err(AppError::NotFound(format!("No stats received for container {}", container_name)))
+    }
+}
+
+fn calculate_cpu_percent(stats: &ContainerStatsResponse) -> f64 
+{
+
+    let calculation = || -> Option<f64> 
+    {
+        let cpu_stats = stats.cpu_stats.as_ref()?;
+        let precpu_stats = stats.precpu_stats.as_ref()?;
+
+        let cpu_usage = cpu_stats.cpu_usage.as_ref()?;
+        let precpu_usage = precpu_stats.cpu_usage.as_ref()?;
+
+        let total_usage = cpu_usage.total_usage?;
+        let pre_total_usage = precpu_usage.total_usage?;
+
+        let cpu_delta = total_usage as f64 - pre_total_usage as f64;
+
+        let system_cpu_delta = (cpu_stats.system_cpu_usage? as f64) - (precpu_stats.system_cpu_usage? as f64);
+
+        let number_of_cpus = cpu_stats.online_cpus.unwrap_or(1) as f64;
+
+        if system_cpu_delta > 0.0 && cpu_delta > 0.0 
+        {
+            Some((cpu_delta / system_cpu_delta) * number_of_cpus * 100.0)
+        } 
+        else 
+        {
+            Some(0.0)
+        }
+    }();
+
+    calculation.unwrap_or(0.0)
+}
+
+fn calculate_memory(stats: &ContainerStatsResponse) -> (u64, u64) 
+{
+    if let Some(mem_stats) = stats.memory_stats.as_ref() 
+    {
+        let usage = mem_stats.usage.unwrap_or(0);
+        let limit = mem_stats.limit.unwrap_or(0);
+
+        let cache = mem_stats.stats.as_ref()
+            .and_then(|s| s.get("cache"))
+            .map_or(0, |v| *v);
+
+        let actual_usage = usage.saturating_sub(cache);
+        (actual_usage, limit)
+    } 
+    else 
+    {
+        (0, 0)
+    }
 }

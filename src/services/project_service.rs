@@ -193,4 +193,23 @@ pub async fn get_project_participants(pool: &PgPool, project_id: i32) -> Result<
         })
 }
 
-
+pub async fn update_project_image_and_container(
+    pool: &PgPool,
+    project_id: i32,
+    new_image_url: &str,
+    new_container_id: &str,
+) -> Result<(), AppError> 
+{
+    sqlx::query("UPDATE projects SET image_url = $1, container_id = $2 WHERE id = $3")
+        .bind(new_image_url)
+        .bind(new_container_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .map_err(|e| 
+        {
+            error!("Failed to update project {} with new image: {}", project_id, e);
+            AppError::InternalServerError
+        })?;
+    Ok(())
+}

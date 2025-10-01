@@ -37,12 +37,15 @@ pub fn create_router(state: AppState) -> Router
         .route("/api/projects/{project_id}/start", post(handlers::project_handler::start_project_handler))
         .route("/api/projects/{project_id}/stop", post(handlers::project_handler::stop_project_handler))
         .route("/api/projects/{project_id}/restart", post(handlers::project_handler::restart_project_handler))
+        .route("/api/projects/{project_id}/logs", get(handlers::project_handler::get_project_logs_handler))
+        .route("/api/projects/{project_id}/metrics", get(handlers::project_handler::get_project_metrics_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(common_layer.clone());
 
     let long_running_protected_routes = Router::new()
         .route("/api/projects/deploy", post(handlers::project_handler::deploy_project_handler))
         .route("/api/projects/{project_id}", delete(handlers::project_handler::purge_project_handler))
+        .route("/api/projects/{project_id}/image", axum::routing::put(handlers::project_handler::update_project_image_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(long_running_layer);
 

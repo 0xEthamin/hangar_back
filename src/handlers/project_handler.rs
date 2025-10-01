@@ -4,13 +4,10 @@ use axum::{extract::{Path, State}, http::StatusCode, response::{IntoResponse, Js
 use bollard::Docker;
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use crate::
 {
-    error::{AppError, ProjectErrorCode}, 
-    services::{docker_service, jwt::Claims, project_service, validation_service}, 
-    state::AppState,
-    model::project::ProjectDetailsResponse
+    error::{AppError, ProjectErrorCode}, model::project::{ProjectDetailsResponse, ProjectMetrics}, services::{docker_service, jwt::Claims, project_service, validation_service}, state::AppState
 };
 
 #[derive(Deserialize)]
@@ -27,6 +24,12 @@ enum ProjectAction
     Start,
     Stop,
     Restart,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateImagePayload 
+{
+    new_image_url: String,
 }
 
 impl ProjectAction 
@@ -260,7 +263,7 @@ pub async fn get_project_details_handler(
 ) -> Result<impl IntoResponse, AppError> 
 {
     let user_login = claims.sub;
-    info!("User '{}' fetching details for project ID: {}", user_login, project_id);
+    debug!("User '{}' fetching details for project ID: {}", user_login, project_id);
 
     match project_service::get_project_by_id_for_user(&state.db_pool, project_id, &user_login).await? 
     {
@@ -344,4 +347,130 @@ pub async fn restart_project_handler(
 ) -> Result<impl IntoResponse, AppError> 
 {
     project_control_handler(state, claims, project_id, ProjectAction::Restart).await
+}
+
+pub async fn get_project_logs_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub).await?
+        .ok_or_else(|| AppError::NotFound("Project not found or access denied.".to_string()))?;
+
+    let container_name = format!("{}-{}", &state.config.app_prefix, project.name);
+
+    let logs = docker_service::get_container_logs(&state.docker_client, &container_name, "200").await?;
+
+    Ok(Json(json!({ "logs": logs })))
+}
+
+pub async fn get_project_metrics_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<Json<ProjectMetrics>, AppError> 
+{
+    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub).await?
+        .ok_or_else(|| AppError::NotFound("Project not found or access denied.".to_string()))?;
+
+    let container_name = format!("{}-{}", &state.config.app_prefix, project.name);
+
+    info!("Fetching metrics for container '{}' (Project ID: {})", container_name, project_id);
+    
+    let metrics = docker_service::get_container_metrics(&state.docker_client, &container_name).await?;
+
+    Ok(Json(metrics))
+}
+
+pub async fn update_project_image_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+    Json(payload): Json<UpdateImagePayload>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = &claims.sub;
+    info!("User '{}' initiated image update for project ID: {}", user_login, project_id);
+
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login)
+        .await?
+        .ok_or_else(|| 
+        {
+            warn!("Update failed: Project ID {} not found or not owned by user '{}'.", project_id, user_login);
+            AppError::NotFound(format!("Project with ID {} not found or you are not the owner.", project_id))
+        })?;
+
+    validation_service::validate_image_url(&payload.new_image_url)?;
+
+    docker_service::pull_image(&state.docker_client, &payload.new_image_url).await?;
+
+    if let Err(scan_error) = docker_service::scan_image_with_grype(&payload.new_image_url, &state.config).await 
+    {
+        warn!("Image scan failed for '{}'. Rolling back by removing the pulled image.", payload.new_image_url);
+        if let Err(e) = docker_service::remove_image(&state.docker_client, &payload.new_image_url).await 
+        {
+            error!("ROLLBACK FAILED: Could not remove image '{}' after scan failure: {}", payload.new_image_url, e);
+        }
+        return Err(scan_error);
+    }
+
+    let old_container_name = format!("{}-{}", &state.config.app_prefix, &project.name);
+    docker_service::remove_container(&state.docker_client, &old_container_name).await?;
+
+    let new_container_id = match docker_service::create_project_container(
+        &state.docker_client,
+        &project.name,
+        &payload.new_image_url,
+        &state.config,
+    ).await 
+    {
+        Ok(id) => id,
+        Err(creation_error) => 
+        {
+            error!("Failed to create new container for project '{}'. The service is now down.", project.name);
+            if let Err(e) = docker_service::remove_image(&state.docker_client, &payload.new_image_url).await 
+            {
+                error!("Could not remove new image '{}' after container creation failure: {}", payload.new_image_url, e);
+            }
+            return Err(creation_error);
+        }
+    };
+
+    project_service::update_project_image_and_container(
+        &state.db_pool,
+        project.id,
+        &payload.new_image_url,
+        &new_container_id,
+    ).await?;
+    
+    let docker_client = state.docker_client.clone();
+    let old_image_url = project.image_url.clone();
+    tokio::spawn(async move
+    {
+        info!("Attempting to remove old image in background: {}", old_image_url);
+        if let Err(e) = docker_service::remove_image(&docker_client, &old_image_url).await 
+        {
+             warn!("Could not remove old image '{}': {}", old_image_url, e);
+        }
+    });
+
+    info!("Project '{}' image updated successfully by user '{}'.", project.name, user_login);
+
+    Ok
+    (
+        (
+            StatusCode::OK,
+            Json
+            (
+                json!
+                (
+                    {
+                        "status": "success",
+                        "message": "Project image updated successfully."
+                    }
+                ),
+            )
+        )
+    )
 }

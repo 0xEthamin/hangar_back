@@ -20,3 +20,11 @@ pub struct ProjectDetailsResponse
     pub project: Project,
     pub participants: Vec<String>,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectMetrics 
+{
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
+    pub memory_limit: f64,
+}
