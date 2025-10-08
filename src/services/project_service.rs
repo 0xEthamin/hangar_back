@@ -1,5 +1,5 @@
 use sqlx::{PgPool, Postgres, Transaction};
-use tracing::error;
+use tracing::{error, warn};
 use crate::{error::{AppError, ProjectErrorCode}, model::project::Project};
 
 pub async fn check_project_name_exists(pool: &PgPool, name: &str) -> Result<bool, AppError> 
@@ -211,5 +211,53 @@ pub async fn update_project_image_and_container(
             error!("Failed to update project {} with new image: {}", project_id, e);
             AppError::InternalServerError
         })?;
+    Ok(())
+}
+
+pub async fn add_participant_to_project(
+    pool: &PgPool,
+    project_id: i32,
+    participant_id: &str,
+) -> Result<(), AppError> 
+{
+    sqlx::query(
+        "INSERT INTO project_participants (project_id, participant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+    )
+    .bind(project_id)
+    .bind(participant_id)
+    .execute(pool)
+    .await
+    .map_err(|e| 
+    {
+        error!("Failed to add participant '{}' to project {}: {}", participant_id, project_id, e);
+        AppError::InternalServerError
+    })?;
+    Ok(())
+}
+
+pub async fn remove_participant_from_project(
+    pool: &PgPool,
+    project_id: i32,
+    participant_id: &str,
+) -> Result<(), AppError> 
+{
+    let result = sqlx::query(
+        "DELETE FROM project_participants WHERE project_id = $1 AND participant_id = $2"
+    )
+    .bind(project_id)
+    .bind(participant_id)
+    .execute(pool)
+    .await
+    .map_err(|e| 
+    {
+        error!("Failed to remove participant '{}' from project {}: {}", participant_id, project_id, e);
+        AppError::InternalServerError
+    })?;
+
+    if result.rows_affected() == 0 
+    {
+        warn!("Attempted to remove non-existent participant '{}' from project {}", participant_id, project_id);
+    }
+
     Ok(())
 }

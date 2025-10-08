@@ -32,6 +32,13 @@ pub struct UpdateImagePayload
     new_image_url: String,
 }
 
+#[derive(Deserialize)]
+pub struct ParticipantPayload 
+{
+    participant_id: String,
+}
+
+
 impl ProjectAction 
 {
     async fn execute(self, docker: Docker, container_name: String) -> Result<(), AppError> 
@@ -59,7 +66,7 @@ pub async fn deploy_project_handler(
     let participants: HashSet<String> = payload.participants.into_iter().collect();
     if participants.contains(&user_login) 
     {
-        return Err(AppError::BadRequest("The owner cannot be a participant.".to_string()));
+        return Err(ProjectErrorCode::OwnerCannotBeParticipant.into());
     }
     let final_participants: Vec<String> = participants.into_iter().collect();
 
@@ -376,7 +383,7 @@ pub async fn get_project_metrics_handler(
 
     let container_name = format!("{}-{}", &state.config.app_prefix, project.name);
 
-    info!("Fetching metrics for container '{}' (Project ID: {})", container_name, project_id);
+    debug!("Fetching metrics for container '{}' (Project ID: {})", container_name, project_id);
     
     let metrics = docker_service::get_container_metrics(&state.docker_client, &container_name).await?;
 
@@ -473,4 +480,48 @@ pub async fn update_project_image_handler(
             )
         )
     )
+}
+
+pub async fn add_participant_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+    Json(payload): Json<ParticipantPayload>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = &claims.sub;
+    info!("User '{}' trying to add participant '{}' to project {}", user_login, payload.participant_id, project_id);
+
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
+
+    if project.owner == payload.participant_id 
+    {
+        return Err(ProjectErrorCode::OwnerCannotBeParticipant.into());
+    }
+
+    project_service::add_participant_to_project(&state.db_pool, project_id, &payload.participant_id).await?;
+
+    info!("Participant '{}' added successfully to project {}", payload.participant_id, project_id);
+    Ok((StatusCode::CREATED, Json(json!({"status": "success", "message": "Participant added."}))))
+}
+
+pub async fn remove_participant_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path((project_id, participant_id)): Path<(i32, String)>,
+) -> Result<impl IntoResponse, AppError> 
+{
+    let user_login = &claims.sub;
+    info!("User '{}' trying to remove participant '{}' from project {}", user_login, participant_id, project_id);
+
+    project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
+
+    project_service::remove_participant_from_project(&state.db_pool, project_id, &participant_id).await?;
+    
+    info!("Participant '{}' removed successfully from project {}", participant_id, project_id);
+    Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Participant removed."}))))
 }

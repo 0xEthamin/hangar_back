@@ -39,6 +39,8 @@ pub fn create_router(state: AppState) -> Router
         .route("/api/projects/{project_id}/restart", post(handlers::project_handler::restart_project_handler))
         .route("/api/projects/{project_id}/logs", get(handlers::project_handler::get_project_logs_handler))
         .route("/api/projects/{project_id}/metrics", get(handlers::project_handler::get_project_metrics_handler))
+        .route("/api/projects/{project_id}/participants", post(handlers::project_handler::add_participant_handler))
+        .route("/api/projects/{project_id}/participants/{participant_id}", delete(handlers::project_handler::remove_participant_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(common_layer.clone());
 

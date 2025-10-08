@@ -47,6 +47,8 @@ pub enum ProjectErrorCode
     ProjectNameTaken,
     #[error("You already own a project. Only one is allowed per user.")]
     OwnerAlreadyExists,
+    #[error("The project owner cannot be added as a participant.")]
+    OwnerCannotBeParticipant,
     #[error("The project name is invalid. It must be 1-63 characters, contain only a-z, 0-9, or '-', and not start/end with a hyphen.")]
     InvalidProjectName,
     #[error("The provided Docker image URL is invalid or contains forbidden characters.")]
@@ -70,6 +72,7 @@ impl ProjectErrorCode
         {
             ProjectErrorCode::ProjectNameTaken => "PROJECT_NAME_TAKEN",
             ProjectErrorCode::OwnerAlreadyExists => "OWNER_ALREADY_EXISTS",
+            ProjectErrorCode::OwnerCannotBeParticipant => "OWNER_CANNOT_BE_PARTICIPANT",
             ProjectErrorCode::InvalidProjectName => "INVALID_PROJECT_NAME",
             ProjectErrorCode::InvalidImageUrl => "INVALID_IMAGE_URL",
             ProjectErrorCode::ImagePullFailed => "IMAGE_PULL_FAILED",
