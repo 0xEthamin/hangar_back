@@ -98,10 +98,10 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
         ]),
         readonly_rootfs: Some(false),
         privileged: Some(false),
-        pids_limit: Some(256),
+        pids_limit: Some(1024),
         ulimits: Some(vec![
             ResourcesUlimits { name: Some("nofile".to_string()), soft: Some(1024), hard: Some(2048) },
-            ResourcesUlimits { name: Some("nproc".to_string()), soft: Some(64), hard: Some(128) }
+            ResourcesUlimits { name: Some("nproc".to_string()), soft: Some(512), hard: Some(1024) }
         ]),
         
         // Montages sécurisés
@@ -118,7 +118,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
     labels.insert("traefik.enable".to_string(), "true".to_string());
     labels.insert(format!("traefik.http.routers.{}.rule", project_name), format!("Host(`{}`)", hostname));
     labels.insert(format!("traefik.http.routers.{}.entrypoints", project_name), config.traefik_entrypoint.clone());
-    labels.insert(format!("traefik.http.routers.{}.tls.certresolver", project_name), config.traefik_cert_resolver.clone());
+    //labels.insert(format!("traefik.http.routers.{}.tls.certresolver", project_name), config.traefik_cert_resolver.clone());
     labels.insert(format!("traefik.http.services.{}.loadbalancer.server.port", project_name), "80".to_string());
 
     let config = ContainerCreateBody 
