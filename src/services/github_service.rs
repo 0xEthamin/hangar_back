@@ -1,10 +1,11 @@
+use std::path::Path;
+
 use crate::{config::Config, error::{AppError, ProjectErrorCode}};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tokio::process::Command;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-
+use git2::{Cred, FetchOptions, RemoteCallbacks, build::RepoBuilder};
 
 #[derive(Debug, Deserialize)]
 struct Installation
@@ -33,7 +34,9 @@ struct InstallationTokenResponse
 {
     token: String,
 }
-pub async fn extract_github_username(repo_url: &str) -> Result<String, AppError>
+
+
+pub async fn extract_repo_owner_and_name(repo_url: &str) -> Result<(String, String), AppError>
 {
     let url = repo_url.trim();
     
@@ -55,40 +58,68 @@ pub async fn extract_github_username(repo_url: &str) -> Result<String, AppError>
         .split('/')
         .collect();
 
-    if parts.len() < 3 
-    {
+    if parts.len() < 3 {
         return Err(AppError::BadRequest(
             "Invalid GitHub repository URL format. Expected: https://github.com/username/repository".to_string()
         ));
     }
     
-    if !parts[0].eq_ignore_ascii_case("github.com") 
-    {
-        return Err(AppError::BadRequest(
-            "Invalid GitHub URL. Must start with 'github.com'.".to_string()
-        ));
-    }
-
-    let username = parts[1];
+    let owner = parts[1];
+    let repo_name = parts[2];
     
-    if username.is_empty() 
-    {
+    if owner.is_empty() || repo_name.is_empty() {
         return Err(AppError::BadRequest(
-            "GitHub username cannot be empty in the repository URL.".to_string()
+            "GitHub owner and repository name cannot be empty in the URL.".to_string()
         ));
     }
     
-    let reserved_keywords = ["orgs", "organizations", "settings", "marketplace", "explore"];
-    if reserved_keywords.contains(&username) 
-    {
-        return Err(AppError::BadRequest(
-            format!("'{}' is not a valid GitHub username.", username)
-        ));
-    }
-    
-    info!("Extracted GitHub username '{}' from URL '{}'", username, repo_url);
-    Ok(username.to_string())
+    info!("Extracted GitHub owner '{}' and repo '{}' from URL '{}'", owner, repo_name, repo_url);
+    Ok((owner.to_string(), repo_name.to_string()))
 }
+
+pub async fn check_repo_accessibility(
+    http_client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<(), AppError> 
+{
+    let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+    info!("Checking repository accessibility at: {}", url);
+
+    let response = http_client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "Hangar App")
+        .send()
+        .await?;
+
+    if response.status().is_success() 
+    {
+        info!("Access to repository '{}/{}' confirmed.", owner, repo);
+        Ok(())
+    } 
+    else if response.status() == reqwest::StatusCode::NOT_FOUND 
+    {
+        warn!(
+            "Access check for repo '{}/{}' failed with 404. The App likely lacks permission.",
+            owner, repo
+        );
+        Err(ProjectErrorCode::GithubRepoNotAccessible.into())
+    } 
+    else 
+    {
+        let error_body = response.text().await.unwrap_or_default();
+        error!(
+            "GitHub API request to check repo accessibility failed: {}",
+            error_body
+        );
+        Err(AppError::InternalServerError)
+    }
+}
+
+
 async fn generate_app_jwt(config: &Config) -> Result<String, AppError>
 {
     let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
@@ -169,32 +200,51 @@ pub async fn get_installation_token(installation_id: u64, http_client: &reqwest:
     Ok(token_response.token)
 }
 
-pub async fn clone_repo(repo_url: &str, target_dir: &std::path::Path, token: &str) -> Result<(), AppError>
+pub async fn clone_repo(repo_url: &str, target_dir: &Path, token: Option<&str>) -> Result<(), AppError>
 {
+    let repo_url_owned = repo_url.to_string();
+    let target_dir = target_dir.to_path_buf();
+    let token = token.map(|s| s.to_string());
 
-    let authenticated_url = repo_url.replace("https://", &format!("https://x-access-token:{}@", token));
+    let repo_url_for_log = repo_url_owned.clone();
 
-    let output = Command::new("git")
-        .arg("clone")
-        .arg("--depth=1")
-        .arg(authenticated_url)
-        .arg(target_dir)
-        .output()
-        .await
-        .map_err(|e| 
-        {
-            error!("Failed to execute git clone command: {}", e);
-            AppError::InternalServerError
-        })?;
-
-    if !output.status.success()
+    let clone_result = tokio::task::spawn_blocking(move ||
     {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!("Failed to clone repository '{}': {}", repo_url, stderr);
-        return Err(AppError::BadRequest("Failed to clone repository. Check if the URL is correct and if the App has access.".to_string()));
-    }
+        let mut callbacks = RemoteCallbacks::new();
 
-    info!("Repository {} cloned successfully.", repo_url);
+        if let Some(t) = &token
+        {
+            callbacks.credentials(move |_url, _username_from_url, _allowed_types|
+            {
+                Cred::userpass_plaintext("x-access-token", t)
+            });
+        }
+
+        let mut fo = FetchOptions::new();
+        fo.remote_callbacks(callbacks);
+        fo.depth(1);
+
+        let mut builder = RepoBuilder::new();
+        builder.fetch_options(fo);
+
+        builder.clone(&repo_url_owned, &target_dir)
+    })
+    .await
+    .map_err(|_| AppError::InternalServerError)?;
+
+    clone_result.map_err(|e|
+    {
+        let msg = e.message().to_lowercase();
+        if msg.contains("authentication required") || msg.contains("credentials callback returned an error")
+        {
+            AppError::ProjectError(ProjectErrorCode::GithubAccountNotLinked)
+        }
+        else
+        {   error!("git2 clone failed for repo '{}': {}", repo_url_for_log, msg);
+            AppError::BadRequest("Failed to clone repository. Check if the URL is correct.".to_string())
+        }
+    })?;
+
+    info!("Repository {} cloned successfully.", repo_url_for_log);
     Ok(())
 }
-

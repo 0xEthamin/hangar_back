@@ -35,7 +35,7 @@ pub async fn create_project<'a>(
     let project = sqlx::query_as::<_, Project>(
         "INSERT INTO projects (name, owner, container_name, source_type, source_url, deployed_image_tag)
          VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, owner, container_name, source_type as source, source_url, deployed_image_tag, created_at",
+         RETURNING id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at",
     )
     .bind(name)
     .bind(owner)
@@ -81,7 +81,7 @@ pub async fn delete_project_by_id(pool: &PgPool, project_id: i32) -> Result<(), 
     Ok(())
 }
 
-const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type as source, source_url, deployed_image_tag, created_at FROM projects";
+const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at FROM projects";
 
 pub async fn get_projects_by_owner(pool: &PgPool, owner: &str) -> Result<Vec<Project>, AppError> 
 {
@@ -119,7 +119,7 @@ pub async fn get_project_by_id_and_owner(
 pub async fn get_participating_projects(pool: &PgPool, participant_id: &str) -> Result<Vec<Project>, AppError> 
 {
     sqlx::query_as::<_, Project>(
-        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type as source, p.source_url, p.deployed_image_tag, p.created_at
+        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.deployed_image_tag, p.created_at
          FROM projects p
          JOIN project_participants pp ON p.id = pp.project_id
          WHERE pp.participant_id = $1
@@ -142,7 +142,7 @@ pub async fn get_project_by_id_for_user(
 ) -> Result<Option<Project>, AppError> 
 {
     sqlx::query_as::<_, Project>(
-        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type as source, p.source_url, p.deployed_image_tag, p.created_at
+        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.deployed_image_tag, p.created_at
          FROM projects p
          LEFT JOIN project_participants pp ON p.id = pp.project_id
          WHERE p.id = $1 AND (p.owner = $2 OR pp.participant_id = $2)"

@@ -1,5 +1,4 @@
 use std::{collections::HashSet, fs};
-
 use axum::
 {
     extract::{Path, State},
@@ -47,6 +46,7 @@ pub struct ParticipantPayload
 {
     participant_id: String,
 }
+
 
 impl ProjectAction
 {
@@ -155,7 +155,21 @@ pub async fn deploy_project_handler(
     tx.commit().await.map_err(|_| AppError::InternalServerError)?;
 
     info!("Project '{}' by user '{}' created successfully.", payload.project_name, user_login);
-    Ok((StatusCode::CREATED, Json(json!({ "project": new_project }))))
+
+
+    let mut project_json = serde_json::to_value(new_project).unwrap_or(json!({}));
+
+    if let Some(obj) = project_json.as_object_mut() 
+    {
+        obj.insert("participants".to_string(), json!(final_participants));
+    }
+
+    let response_body = json!(
+    {
+        "project": project_json
+    });
+
+    Ok((StatusCode::CREATED, Json(response_body)))
 }
 
 
@@ -163,7 +177,27 @@ async fn prepare_direct_source(state: &AppState, image_url: &str) -> Result<Stri
 {
     info!("Preparing 'direct' source from image '{}'", image_url);
     validation_service::validate_image_url(image_url)?;
-    docker_service::pull_image(&state.docker_client, image_url).await?;
+    
+    let pull_result = docker_service::pull_image(&state.docker_client, image_url, None).await;
+
+    if let Err(e) = pull_result 
+    {
+        if image_url.starts_with("ghcr.io/") 
+        {
+            if let bollard::errors::Error::DockerResponseServerError { status_code, .. } = &e 
+            {
+                if *status_code == 401 || *status_code == 403 
+                {
+                    warn!("Failed to pull private image from ghcr.io: {}", image_url);
+                    return Err(ProjectErrorCode::GithubPackageNotPublic.into());
+                }
+            }
+        }
+        
+        error!("Failed to pull image '{}': {}", image_url, e);
+        return Err(ProjectErrorCode::ImagePullFailed.into());
+    }
+    info!("Successfully pulled public image '{}'", image_url);
 
     if let Err(scan_error) = docker_service::scan_image_with_grype(image_url, &state.config).await
     {
@@ -176,7 +210,6 @@ async fn prepare_direct_source(state: &AppState, image_url: &str) -> Result<Stri
 }
 
 
-
 async fn prepare_github_source(
     state: &AppState,
     project_name: &str,
@@ -185,15 +218,34 @@ async fn prepare_github_source(
 {
     info!("Preparing 'github' source for project '{}' from repo '{}'", project_name, repo_url);
 
-    let github_username = github_service::extract_github_username(repo_url).await?;
-    let installation_id = github_service::get_installation_id_by_user(&state.http_client, &state.config, &github_username).await?;
-    let token = github_service::get_installation_token(installation_id, &state.http_client, &state.config).await?;
-
     let temp_dir = TempBuilder::new()
         .prefix("hangar-build-")
         .tempdir()
         .map_err(|_| AppError::InternalServerError)?;
-    github_service::clone_repo(repo_url, temp_dir.path(), &token).await?;
+    
+    match github_service::clone_repo(repo_url, temp_dir.path(), None).await
+    {
+        Ok(_) => 
+        {
+            info!("Successfully cloned public repository '{}'", repo_url);
+        },
+
+          Err(AppError::ProjectError(ProjectErrorCode::GithubAccountNotLinked)) | Err(AppError::BadRequest(_)) =>
+        {
+            warn!("Public clone failed for '{}'. Assuming it's a private repo and attempting authenticated clone.", repo_url);
+
+            let (github_owner, repo_name) = github_service::extract_repo_owner_and_name(repo_url).await?;
+            let installation_id = github_service::get_installation_id_by_user(&state.http_client, &state.config, &github_owner).await?;
+            let token = github_service::get_installation_token(installation_id, &state.http_client, &state.config).await?;
+            github_service::check_repo_accessibility(&state.http_client, &token, &github_owner, &repo_name).await?;
+            github_service::clone_repo(repo_url, temp_dir.path(), Some(&token)).await?;
+            info!("Successfully cloned private repository '{}' using GitHub App token", repo_url);
+        },
+        Err(e) => 
+        {
+            return Err(e);
+        }
+    }
 
     let dockerfile_content = format!(
         "FROM {}\nCOPY --chown=appuser:appgroup . /var/www/html/",
@@ -395,6 +447,7 @@ pub async fn get_project_metrics_handler(
     Ok(Json(metrics))
 }
 
+
 pub async fn update_project_image_handler(
     State(state): State<AppState>,
     claims: Claims,
@@ -409,44 +462,33 @@ pub async fn update_project_image_handler(
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
 
-    // On ne peut mettre à jour l'image que pour les projets de type 'direct'.
-    // On implémentera plus tard pour 'github' pour mettre à jour le code.
     if !matches!(project.source, ProjectSourceType::Direct)
     {
         return Err(AppError::BadRequest("Image update is only supported for 'direct' source projects.".to_string()));
     }
-
-    validation_service::validate_image_url(&payload.new_image_url)?;
-
-    docker_service::pull_image(&state.docker_client, &payload.new_image_url).await?;
-
-    if let Err(scan_error) = docker_service::scan_image_with_grype(&payload.new_image_url, &state.config).await
-    {
-        warn!("Image scan failed for '{}'. Rolling back by removing the pulled image.", payload.new_image_url);
-        if let Err(e) = docker_service::remove_image(&state.docker_client, &payload.new_image_url).await
-        {
-            error!("ROLLBACK FAILED: Could not remove image '{}' after scan failure: {}", payload.new_image_url, e);
-        }
-        return Err(scan_error);
-    }
+    
+    let new_image_tag = &payload.new_image_url;
+    prepare_direct_source(&state, new_image_tag).await?;
 
     docker_service::remove_container(&state.docker_client, &project.container_name).await?;
 
     if let Err(creation_error) = docker_service::create_project_container(
         &state.docker_client,
         &project.name,
-        &payload.new_image_url,
+        new_image_tag,
         &state.config,
     ).await
     {
         error!("Failed to create new container for project '{}' during update. The service is now down.", project.name);
+        let _ = docker_service::remove_image(&state.docker_client, new_image_tag).await;
         return Err(creation_error);
     }
 
-    project_service::update_project_image(&state.db_pool, project.id, &payload.new_image_url).await?;
+    project_service::update_project_image(&state.db_pool, project.id, new_image_tag).await?;
 
     let docker_client = state.docker_client.clone();
     let old_image_tag = project.deployed_image_tag;
+    
     tokio::spawn(async move
     {
         info!("Attempting to remove old image in background: {}", old_image_tag);

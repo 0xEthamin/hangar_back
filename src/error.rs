@@ -63,6 +63,10 @@ pub enum ProjectErrorCode
     DeleteFailed,
     #[error("The GitHub App is not installed on the repository owner's account.")]
     GithubAccountNotLinked,
+    #[error("The GitHub App installation does not have access to this repository. Please update your installation settings.")]
+    GithubRepoNotAccessible,
+    #[error("Images from ghcr.io must be public for direct deployment.")]
+    GithubPackageNotPublic, 
 }
 
 
@@ -82,6 +86,8 @@ impl ProjectErrorCode
             ProjectErrorCode::ContainerCreationFailed => "CONTAINER_CREATION_FAILED",
             ProjectErrorCode::DeleteFailed => "DELETE_FAILED",
             ProjectErrorCode::GithubAccountNotLinked => "GITHUB_ACCOUNT_NOT_LINKED",
+            ProjectErrorCode::GithubRepoNotAccessible => "GITHUB_REPO_NOT_ACCESSIBLE",
+            ProjectErrorCode::GithubPackageNotPublic => "GITHUB_PACKAGE_NOT_PUBLIC",
         }
     }
 }

@@ -3,6 +3,7 @@ use time::OffsetDateTime;
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::Type)]
 #[sqlx(type_name = "project_source_type", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ProjectSourceType 
 {
     Direct,

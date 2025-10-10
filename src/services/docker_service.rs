@@ -1,3 +1,5 @@
+use bollard::auth::DockerCredentials;
+use bollard::errors::Error as BollardError;
 use bollard::secret::{ContainerState, ContainerStatsResponse, ResourcesUlimits, RestartPolicy};
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
@@ -18,7 +20,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::{AppError, ProjectErrorCode};
 use crate::model::project::ProjectMetrics;
 
-pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError> 
+pub async fn pull_image(docker: &Docker, image_url: &str, credentials: Option<DockerCredentials>) -> Result<(), BollardError> 
 {
     let options = Some(CreateImageOptions 
     {
@@ -26,7 +28,7 @@ pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError
         ..Default::default()
     });
 
-    let mut stream = docker.create_image(options, None, None);
+    let mut stream = docker.create_image(options, None, credentials);
 
     while let Some(result) = stream.next().await 
     {
@@ -34,6 +36,17 @@ pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError
         {
             Ok(info) => 
             {
+                if let Some(error_detail) = info.error_detail 
+                {
+                    if let Some(message) = error_detail.message 
+                    {
+                        if message.to_lowercase().contains("unauthorized") || message.to_lowercase().contains("authentication required") 
+                        {
+                            warn!("Authentication error during image pull for '{}': {}", image_url, message);
+                        }
+                    }
+                }
+
                 if let Some(status) = info.status 
                 {
                     tracing::debug!("Pulling image {}: {}", image_url, status);
@@ -41,14 +54,14 @@ pub async fn pull_image(docker: &Docker, image_url: &str) -> Result<(), AppError
             }
             Err(e) => 
             {
-                error!("Failed to pull image '{}': {}", image_url, e);
-                return Err(ProjectErrorCode::ImagePullFailed.into());
+                return Err(e);
             }
         }
     }
     info!("Image '{}' pulled successfully.", image_url);
     Ok(())
 }
+
 
 pub async fn scan_image_with_grype(image_url: &str, config: &crate::config::Config) -> Result<(), AppError> 
 {
@@ -440,7 +453,6 @@ pub async fn build_image_from_tar(
                 }
                 if let Some(stream_content) = info.stream
                 {
-                    // On log le flux de build pour le debug
                     debug!("Build > {}", stream_content.trim());
                 }
             }
