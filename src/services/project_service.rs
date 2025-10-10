@@ -1,6 +1,6 @@
 use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{error, warn};
-use crate::{error::{AppError, ProjectErrorCode}, model::project::Project};
+use crate::{error::{AppError, ProjectErrorCode}, model::project::{Project, ProjectSourceType}};
 
 pub async fn check_project_name_exists(pool: &PgPool, name: &str) -> Result<bool, AppError> 
 {
@@ -26,31 +26,37 @@ pub async fn create_project<'a>(
     tx: &mut Transaction<'a, Postgres>,
     name: &str,
     owner: &str,
-    image_url: &str,
-    container_id: &str,
+    container_name: &str,
+    source_type: ProjectSourceType,
+    source_url: &str,
+    deployed_image_tag: &str,
 ) -> Result<Project, AppError> 
 {
     let project = sqlx::query_as::<_, Project>(
-        "INSERT INTO projects (name, owner, image_url, container_id) VALUES ($1, $2, $3, $4) RETURNING *"
+        "INSERT INTO projects (name, owner, container_name, source_type, source_url, deployed_image_tag)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, name, owner, container_name, source_type as source, source_url, deployed_image_tag, created_at",
     )
-        .bind(name)
-        .bind(owner)
-        .bind(image_url)
-        .bind(container_id)
-        .fetch_one(&mut **tx) 
-        .await
-        .map_err(|e: sqlx::Error| 
+    .bind(name)
+    .bind(owner)
+    .bind(container_name)
+    .bind(source_type)
+    .bind(source_url)
+    .bind(deployed_image_tag)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e: sqlx::Error| 
+    {
+        error!("Failed to create project in DB: {}", e);
+        if let Some(db_err) = e.as_database_error() 
         {
-            error!("Failed to create project in DB: {}", e);
-            if let Some(db_err) = e.as_database_error() 
+            if db_err.is_unique_violation() 
             {
-                if db_err.is_unique_violation() 
-                {
-                    return AppError::BadRequest("Project name or owner already exists.".to_string());
-                }
+                return AppError::ProjectError(ProjectErrorCode::ProjectNameTaken);
             }
-            AppError::InternalServerError
-        })?;
+        }
+        AppError::InternalServerError
+    })?;
 
     Ok(project)
 }
@@ -75,11 +81,12 @@ pub async fn delete_project_by_id(pool: &PgPool, project_id: i32) -> Result<(), 
     Ok(())
 }
 
-// Note : On retourne un Vec<Project> pour être prêt pour le futur,
-// même si la logique actuelle ne permet qu'un projet par owner.
+const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type as source, source_url, deployed_image_tag, created_at FROM projects";
+
 pub async fn get_projects_by_owner(pool: &PgPool, owner: &str) -> Result<Vec<Project>, AppError> 
 {
-    sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE owner = $1 ORDER BY created_at DESC")
+    let query = format!("{} WHERE owner = $1 ORDER BY created_at DESC", SELECT_PROJECT_FIELDS);
+    sqlx::query_as::<_, Project>(&query)
         .bind(owner)
         .fetch_all(pool)
         .await
@@ -96,7 +103,8 @@ pub async fn get_project_by_id_and_owner(
     owner: &str,
 ) -> Result<Option<Project>, AppError> 
 {
-    sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = $1 AND owner = $2")
+    let query = format!("{} WHERE id = $1 AND owner = $2", SELECT_PROJECT_FIELDS);
+    sqlx::query_as::<_, Project>(&query)
         .bind(project_id)
         .bind(owner)
         .fetch_optional(pool)
@@ -111,7 +119,8 @@ pub async fn get_project_by_id_and_owner(
 pub async fn get_participating_projects(pool: &PgPool, participant_id: &str) -> Result<Vec<Project>, AppError> 
 {
     sqlx::query_as::<_, Project>(
-        "SELECT p.* FROM projects p
+        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type as source, p.source_url, p.deployed_image_tag, p.created_at
+         FROM projects p
          JOIN project_participants pp ON p.id = pp.project_id
          WHERE pp.participant_id = $1
          ORDER BY p.created_at DESC"
@@ -125,6 +134,43 @@ pub async fn get_participating_projects(pool: &PgPool, participant_id: &str) -> 
             AppError::InternalServerError
         })
 }
+
+pub async fn get_project_by_id_for_user(
+    pool: &PgPool,
+    project_id: i32,
+    user_login: &str,
+) -> Result<Option<Project>, AppError> 
+{
+    sqlx::query_as::<_, Project>(
+        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type as source, p.source_url, p.deployed_image_tag, p.created_at
+         FROM projects p
+         LEFT JOIN project_participants pp ON p.id = pp.project_id
+         WHERE p.id = $1 AND (p.owner = $2 OR pp.participant_id = $2)"
+    )
+        .bind(project_id)
+        .bind(user_login)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| 
+        {
+            error!("Failed to fetch project {} for user '{}': {}", project_id, user_login, e);
+            AppError::InternalServerError
+        })
+}
+
+pub async fn get_project_participants(pool: &PgPool, project_id: i32) -> Result<Vec<String>, AppError> 
+{
+    sqlx::query_scalar("SELECT participant_id FROM project_participants WHERE project_id = $1")
+        .bind(project_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| 
+        {
+            error!("Failed to fetch participants for project {}: {}", project_id, e);
+            AppError::InternalServerError
+        })
+}
+
 
 pub async fn add_project_participants<'a>(
     tx: &mut Transaction<'a, Postgres>,
@@ -158,51 +204,16 @@ pub async fn add_project_participants<'a>(
     Ok(())
 }
 
-pub async fn get_project_by_id_for_user(
-    pool: &PgPool,
-    project_id: i32,
-    user_login: &str,
-) -> Result<Option<Project>, AppError> 
-{
-    sqlx::query_as::<_, Project>(
-        "SELECT p.* FROM projects p
-         LEFT JOIN project_participants pp ON p.id = pp.project_id
-         WHERE p.id = $1 AND (p.owner = $2 OR pp.participant_id = $2)"
-    )
-        .bind(project_id)
-        .bind(user_login)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| 
-        {
-            error!("Failed to fetch project {} for user '{}': {}", project_id, user_login, e);
-            AppError::InternalServerError
-        })
-}
 
-pub async fn get_project_participants(pool: &PgPool, project_id: i32) -> Result<Vec<String>, AppError> 
-{
-    sqlx::query_scalar("SELECT participant_id FROM project_participants WHERE project_id = $1")
-        .bind(project_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| 
-        {
-            error!("Failed to fetch participants for project {}: {}", project_id, e);
-            AppError::InternalServerError
-        })
-}
-
-pub async fn update_project_image_and_container(
+pub async fn update_project_image(
     pool: &PgPool,
     project_id: i32,
     new_image_url: &str,
-    new_container_id: &str,
 ) -> Result<(), AppError> 
 {
-    sqlx::query("UPDATE projects SET image_url = $1, container_id = $2 WHERE id = $3")
+    sqlx::query("UPDATE projects SET source_url = $1, deployed_image_tag = $2 WHERE id = $3")
         .bind(new_image_url)
-        .bind(new_container_id)
+        .bind(new_image_url)
         .bind(project_id)
         .execute(pool)
         .await
@@ -213,6 +224,7 @@ pub async fn update_project_image_and_container(
         })?;
     Ok(())
 }
+
 
 pub async fn add_participant_to_project(
     pool: &PgPool,

@@ -61,6 +61,8 @@ pub enum ProjectErrorCode
     ContainerCreationFailed,
     #[error("Failed to delete the project.")]
     DeleteFailed,
+    #[error("The GitHub App is not installed on the repository owner's account.")]
+    GithubAccountNotLinked,
 }
 
 
@@ -79,6 +81,7 @@ impl ProjectErrorCode
             ProjectErrorCode::ImageScanFailed(_) => "IMAGE_SCAN_FAILED",
             ProjectErrorCode::ContainerCreationFailed => "CONTAINER_CREATION_FAILED",
             ProjectErrorCode::DeleteFailed => "DELETE_FAILED",
+            ProjectErrorCode::GithubAccountNotLinked => "GITHUB_ACCOUNT_NOT_LINKED",
         }
     }
 }

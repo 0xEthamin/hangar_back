@@ -1,7 +1,8 @@
 use crate::error::ConfigError;
 use serde::Deserialize;
+use base64::prelude::*;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct Config
 {
     pub host: String,
@@ -13,6 +14,9 @@ pub struct Config
     pub cas_validation_url: String,
     pub app_prefix: String,
     pub app_domain_suffix: String,
+    pub build_base_image: String,
+    pub github_app_id: String,
+    pub github_private_key: Vec<u8>,
     pub docker_network: String,
     pub traefik_entrypoint: String,
     pub traefik_cert_resolver: String,
@@ -56,6 +60,19 @@ impl Config
         let app_prefix = std::env::var("APP_PREFIX").unwrap_or_else(|_| "hangar".to_string());
         let app_domain_suffix =
             std::env::var("APP_DOMAIN_SUFFIX").unwrap_or_else(|_| "localhost".to_string());
+
+        let build_base_image = std::env::var("BUILD_BASE_IMAGE")
+            .map_err(|_| ConfigError::Missing("BUILD_BASE_IMAGE".to_string()))?;
+
+        let github_app_id = std::env::var("GITHUB_APP_ID")
+            .map_err(|_| ConfigError::Missing("GITHUB_APP_ID".to_string()))?;
+
+        let private_key_b64 = std::env::var("GITHUB_PRIVATE_KEY_B64")
+            .map_err(|_| ConfigError::Missing("GITHUB_PRIVATE_KEY_B64".to_string()))?;
+
+        let github_private_key = BASE64_STANDARD.decode(private_key_b64)
+            .map_err(|_| ConfigError::Invalid("GITHUB_PRIVATE_KEY_B64".to_string(), "Invalid Base64".to_string()))?;
+
         let docker_network =
             std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "traefik-net".to_string());
         let traefik_entrypoint = std::env::var("DOCKER_TRAEFIK_ENTRYPOINT")
@@ -101,6 +118,9 @@ impl Config
             cas_validation_url,
             app_prefix,
             app_domain_suffix,
+            build_base_image,
+            github_app_id,
+            github_private_key,
             docker_network,
             traefik_entrypoint,
             traefik_cert_resolver,

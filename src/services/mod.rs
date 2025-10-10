@@ -3,3 +3,4 @@ pub mod jwt;
 pub mod project_service; 
 pub mod docker_service; 
 pub mod validation_service;
+pub mod github_service;

@@ -3,9 +3,8 @@ FROM php:8.4-fpm-alpine3.22@sha256:1f684fd5ae2fe39114d3e4fb562e31a0bf4866ec10dc1
 LABEL maintainer="dsi@garageisep.com"
 LABEL description="Serveur PHP-FPM + Nginx all-in-one"
 
-RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
-
-RUN apk add --no-cache \
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache \
         nginx \
         supervisor \
         libpng-dev \
@@ -13,10 +12,11 @@ RUN apk add --no-cache \
         freetype-dev \
         libzip-dev \
         icu-dev \
+        libxml2 \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j$(nproc) \
         gd mysqli pdo pdo_mysql opcache zip intl \
-    && rm -rf /tmp/*
+    && rm -rf /var/cache/apk/* /tmp/*
 
 RUN { \
     echo 'opcache.enable=1'; \

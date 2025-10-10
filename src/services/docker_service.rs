@@ -3,11 +3,15 @@ use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::
 {
-    CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, LogsOptions, RemoveContainerOptions, RemoveImageOptions, RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions
+    BuildImageOptions, CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, LogsOptions, RemoveContainerOptions, RemoveImageOptions, RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions
 };
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use futures::stream::StreamExt;
+use tar::Builder;
 use tokio::process::Command;
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use tracing::{debug, error, info, warn};
 
@@ -76,7 +80,7 @@ pub async fn scan_image_with_grype(image_url: &str, config: &crate::config::Conf
     Ok(())
 }
 
-pub async fn create_project_container(docker: &Docker, project_name: &str, image_url: &str, config: &crate::config::Config) -> Result<String, AppError> 
+pub async fn create_project_container(docker: &Docker, project_name: &str, image_tag: &str, config: &crate::config::Config) -> Result<String, AppError> 
 {
     let container_name = format!("{}-{}", &config.app_prefix, project_name);
     let hostname = format!("{}.{}", project_name, &config.app_domain_suffix);
@@ -123,7 +127,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
 
     let config = ContainerCreateBody 
     {
-        image: Some(image_url.to_string()),
+        image: Some(image_tag.to_string()),
         host_config: Some(host_config),
         labels: Some(labels),
         ..Default::default()
@@ -161,7 +165,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
     })?;
 
     info!("Container '{}' created and started with ID: {}", container_name, response.id);
-    Ok(response.id)
+    Ok(container_name)
 }
 
 pub async fn remove_container(docker: &Docker, container_name: &str) -> Result<(), AppError> 
@@ -385,4 +389,69 @@ fn calculate_memory(stats: &ContainerStatsResponse) -> (u64, u64)
     {
         (0, 0)
     }
+}
+
+pub fn create_tarball(path: &Path) -> Result<Vec<u8>, AppError>
+{
+    let enc = GzEncoder::new(Vec::new(), Compression::default());
+    let mut tar = Builder::new(enc);
+    
+    tar.append_dir_all(".", path).map_err(|e| 
+    {
+        error!("Failed to append directory to tarball: {}", e);
+        AppError::InternalServerError
+    })?;
+
+    let tar_data = tar.into_inner().and_then(|gz| gz.finish()).map_err(|e| 
+    {
+        error!("Failed to finish tarball creation: {}", e);
+        AppError::InternalServerError
+    })?;
+    
+    Ok(tar_data)
+}
+
+pub async fn build_image_from_tar(
+    docker: &Docker,
+    tar_stream: Vec<u8>,
+    image_tag: &str,
+) -> Result<(), AppError>
+{
+    let options = BuildImageOptions 
+    {
+        dockerfile: "Dockerfile".to_string(),
+        t: Some(image_tag.to_string()),
+        rm: true,
+        ..Default::default()
+    };
+
+    let mut stream = docker.build_image(options, None, Some(bollard::body_full(tar_stream.into())));
+
+    while let Some(result) = stream.next().await
+    {
+        match result
+        {
+            Ok(info) =>
+            {
+                if let Some(error_detail) = info.error_detail
+                {
+                    error!("Failed to build image '{}': {}", image_tag, error_detail.message.unwrap_or_default());
+                    return Err(AppError::BadRequest("Failed to build Docker image from source.".to_string()));
+                }
+                if let Some(stream_content) = info.stream
+                {
+                    // On log le flux de build pour le debug
+                    debug!("Build > {}", stream_content.trim());
+                }
+            }
+            Err(e) =>
+            {
+                error!("Docker build stream error for image '{}': {}", image_tag, e);
+                return Err(AppError::InternalServerError);
+            }
+        }
+    }
+
+    info!("Image '{}' built successfully.", image_tag);
+    Ok(())
 }

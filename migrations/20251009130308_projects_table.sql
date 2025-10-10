@@ -1,21 +1,25 @@
+CREATE TYPE project_source_type AS ENUM ('direct', 'github');
+
 CREATE TABLE projects
 (
     id SERIAL PRIMARY KEY,
 
-    -- Match la validation de validation_service.rs
     name VARCHAR(63) NOT NULL UNIQUE,
 
     owner VARCHAR(255) NOT NULL,
 
-    image_url VARCHAR(2048) NOT NULL,
+    container_name VARCHAR(255) NOT NULL UNIQUE,
+
+    source_type project_source_type NOT NULL,
     
-    container_id VARCHAR(255) NOT NULL,
+    source_url VARCHAR(2048) NOT NULL,
+
+    deployed_image_tag VARCHAR(2048) NOT NULL,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_projects_owner ON projects(owner);
-
 
 CREATE TABLE project_participants
 (
