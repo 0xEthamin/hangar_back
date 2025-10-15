@@ -42,9 +42,7 @@ pub async fn extract_repo_owner_and_name(repo_url: &str) -> Result<(String, Stri
     
     if !url.contains("github.com") 
     {
-        return Err(AppError::BadRequest(
-            "Only GitHub repositories are supported. URL must contain 'github.com'.".to_string()
-        ));
+        return Err(ProjectErrorCode::InvalidGithubUrl.into());
     }
     
     let url_without_protocol = url
@@ -59,18 +57,15 @@ pub async fn extract_repo_owner_and_name(repo_url: &str) -> Result<(String, Stri
         .collect();
 
     if parts.len() < 3 {
-        return Err(AppError::BadRequest(
-            "Invalid GitHub repository URL format. Expected: https://github.com/username/repository".to_string()
-        ));
+        return Err(ProjectErrorCode::InvalidGithubUrl.into());
     }
     
     let owner = parts[1];
     let repo_name = parts[2];
     
-    if owner.is_empty() || repo_name.is_empty() {
-        return Err(AppError::BadRequest(
-            "GitHub owner and repository name cannot be empty in the URL.".to_string()
-        ));
+    if owner.is_empty() || repo_name.is_empty() 
+    {
+        return Err(ProjectErrorCode::InvalidGithubUrl.into());
     }
     
     info!("Extracted GitHub owner '{}' and repo '{}' from URL '{}'", owner, repo_name, repo_url);
@@ -241,7 +236,7 @@ pub async fn clone_repo(repo_url: &str, target_dir: &Path, token: Option<&str>) 
         }
         else
         {   error!("git2 clone failed for repo '{}': {}", repo_url_for_log, msg);
-            AppError::BadRequest("Failed to clone repository. Check if the URL is correct.".to_string())
+            AppError::ProjectError(ProjectErrorCode::InvalidGithubUrl)
         }
     })?;
 

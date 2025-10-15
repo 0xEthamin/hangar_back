@@ -11,9 +11,10 @@ pub struct Claims
     pub name: String,
     pub email: String,
     pub exp: usize,
+    pub is_admin: bool,
 }
 
-pub fn generate_jwt(secret: &str, jwt_expiration_seconds : u64, login: &str, name: &str, email: &str) -> Result<String, AppError> 
+pub fn generate_jwt(secret: &str, jwt_expiration_seconds : u64, login: &str, name: &str, email: &str, is_admin: bool) -> Result<String, AppError> 
 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let claims = Claims 
@@ -22,6 +23,7 @@ pub fn generate_jwt(secret: &str, jwt_expiration_seconds : u64, login: &str, nam
         name: name.to_string(),
         email: email.to_string(),
         exp: (now + jwt_expiration_seconds) as usize,
+        is_admin,
     };
 
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).map_err(|_| AppError::InternalServerError)

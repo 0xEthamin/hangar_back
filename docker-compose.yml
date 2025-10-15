@@ -16,3 +16,18 @@ services:
         POSTGRES_USER: 'hangar_user'
         POSTGRES_PASSWORD: 'hangar_pass'
         POSTGRES_DB: 'hangar_db'
+  hangar-mariadb:
+      container_name: hangar-mariadb
+      image: mariadb:lts
+      restart: unless-stopped
+      ports:
+        - "3306:3306"
+      volumes:
+        - ./mariadb_data:/var/lib/mysql
+      healthcheck:
+        test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "root", "-p ${MARIADB_ROOT_PASSWORD}"]
+        interval: 20s
+        timeout: 10s
+        retries: 5
+      environment:
+        MARIADB_ROOT_PASSWORD: "0bcd70a24bee588b30b71454f70be287d2022c00a99407193c0b6d7622fdb013"

@@ -27,6 +27,9 @@ pub enum AppError
 
     #[error("Project operation failed: {0}")]
     ProjectError(#[from] ProjectErrorCode),
+
+    #[error("Database operation failed: {0}")]
+    DatabaseError(#[from] DatabaseErrorCode),
 }
 
 #[derive(Debug, Error)]
@@ -61,12 +64,34 @@ pub enum ProjectErrorCode
     ContainerCreationFailed,
     #[error("Failed to delete the project.")]
     DeleteFailed,
+    #[error("The provided GitHub URL is invalid or unsupported.")]
+    InvalidGithubUrl,
     #[error("The GitHub App is not installed on the repository owner's account.")]
     GithubAccountNotLinked,
     #[error("The GitHub App installation does not have access to this repository. Please update your installation settings.")]
     GithubRepoNotAccessible,
     #[error("Images from ghcr.io must be public for direct deployment.")]
     GithubPackageNotPublic, 
+    #[error("Usage of the environment variable '{0}' is forbidden.")]
+    ForbiddenEnvVar(String), 
+    #[error("The specified persistent volume path is invalid.")]
+    InvalidVolumePath,
+    #[error("A database operation failed during project creation.")]
+    ProjectCreationFailedWithDatabaseError,
+}
+
+#[derive(Debug, Error, Serialize, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DatabaseErrorCode
+{
+    #[error("You already own a database. Only one is allowed per user.")]
+    DatabaseAlreadyExists,
+    #[error("Failed to provision the database.")]
+    ProvisioningFailed,
+    #[error("Failed to deprovision the database.")]
+    DeprovisioningFailed,
+    #[error("Database not found.")]
+    NotFound,
 }
 
 
@@ -88,6 +113,10 @@ impl ProjectErrorCode
             ProjectErrorCode::GithubAccountNotLinked => "GITHUB_ACCOUNT_NOT_LINKED",
             ProjectErrorCode::GithubRepoNotAccessible => "GITHUB_REPO_NOT_ACCESSIBLE",
             ProjectErrorCode::GithubPackageNotPublic => "GITHUB_PACKAGE_NOT_PUBLIC",
+            ProjectErrorCode::ForbiddenEnvVar(_) => "FORBIDDEN_ENV_VAR",
+            ProjectErrorCode::InvalidVolumePath => "INVALID_VOLUME_PATH",
+            ProjectErrorCode::InvalidGithubUrl => "INVALID_GITHUB_URL",
+            ProjectErrorCode::ProjectCreationFailedWithDatabaseError => "PROJECT_CREATION_FAILED_WITH_DATABASE_ERROR",
         }
     }
 }
@@ -135,6 +164,27 @@ impl IntoResponse for AppError
                     Json(json!({ "error_code": "BAD_REQUEST", "message": message })),
                 )
             }
+
+            AppError::DatabaseError(code) =>
+            {
+                trace!("--> DATABASE ERROR (400): {}", code);
+                let status = match code 
+                {
+                    DatabaseErrorCode::ProvisioningFailed | DatabaseErrorCode::DeprovisioningFailed => StatusCode::INTERNAL_SERVER_ERROR,
+                    _ => StatusCode::BAD_REQUEST
+                };
+
+                let error_json = json!(
+                {
+                    "error_code": format!("{:?}", code).to_uppercase(),
+                    "message": code.to_string()
+                });
+
+                (
+                    status,
+                    Json(error_json),
+                )
+            }
             
             AppError::ProjectError(code) =>
             {
@@ -151,11 +201,19 @@ impl IntoResponse for AppError
                     "message": code.to_string()
                 });
 
-                if let ProjectErrorCode::ImageScanFailed(details) = code 
+                if let Some(obj) = error_json.as_object_mut()
                 {
-                    if let Some(obj) = error_json.as_object_mut() 
+                    match code
                     {
-                        obj.insert("details".to_string(), json!(details));
+                        ProjectErrorCode::ImageScanFailed(details) =>
+                        {
+                            obj.insert("details".to_string(), json!(details));
+                        }
+                        ProjectErrorCode::ForbiddenEnvVar(var) =>
+                        {
+                             obj.insert("details".to_string(), json!({ "variable": var }));
+                        }
+                        _ => {}
                     }
                 }
 

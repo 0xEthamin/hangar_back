@@ -1,5 +1,5 @@
 use crate::error::{AppError, ProjectErrorCode};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub fn validate_project_name(name: &str) -> Result<(), AppError>
 {
@@ -38,5 +38,47 @@ pub fn validate_image_url(url: &str) -> Result<(), AppError>
     {
         return Err(ProjectErrorCode::InvalidImageUrl.into());
     }
+    Ok(())
+}
+
+pub fn validate_env_vars(vars: &HashMap<String, String>) -> Result<(), AppError>
+{
+    const FORBIDDEN_ENV_VARS: &[&str] = &[
+        "PATH", "LD_PRELOAD", "DOCKER_HOST", "HOST", "HOSTNAME",
+        "TRAEFIK_ENABLE",
+    ];
+
+    for key in vars.keys()
+    {
+        if FORBIDDEN_ENV_VARS.iter().any(|&forbidden| key.eq_ignore_ascii_case(forbidden))
+            || key.to_uppercase().starts_with("TRAEFIK_")
+        {
+            return Err(ProjectErrorCode::ForbiddenEnvVar(key.clone()).into());
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_volume_path(path: &str) -> Result<(), AppError>
+{
+    if path.is_empty()
+    {
+        return Err(ProjectErrorCode::InvalidVolumePath.into());
+    }
+    if !path.starts_with('/')
+    {
+        return Err(ProjectErrorCode::InvalidVolumePath.into());
+    }
+    if path.contains("..")
+    {
+        return Err(ProjectErrorCode::InvalidVolumePath.into());
+    }
+
+    const FORBIDDEN_PATHS: &[&str] = &["/", "/etc", "/bin", "/sbin", "/usr", "/boot", "/dev", "/lib", "/proc", "/sys"];
+    if FORBIDDEN_PATHS.contains(&path)
+    {
+        return Err(ProjectErrorCode::InvalidVolumePath.into());
+    }
+
     Ok(())
 }

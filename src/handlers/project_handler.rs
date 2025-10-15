@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs};
+use std::{collections::{HashMap, HashSet}, fs};
 use axum::
 {
     extract::{Path, State},
@@ -10,11 +10,14 @@ use serde_json::json;
 use tempfile::Builder as TempBuilder;
 use tracing::{debug, error, info, warn};
 
+use crate::{error::DatabaseErrorCode, services::crypto_service};
+use base64::prelude::*;
+
 use crate::
 {
     error::{AppError, ProjectErrorCode},
     model::project::{ProjectDetailsResponse, ProjectMetrics, ProjectSourceType},
-    services::{docker_service, github_service, jwt::Claims, project_service, validation_service},
+    services::{docker_service, github_service, jwt::Claims, project_service, validation_service, database_service},
     state::AppState,
 };
 
@@ -25,6 +28,15 @@ pub struct DeployPayload
     image_url: Option<String>,
     github_repo_url: Option<String>,
     participants: Vec<String>,
+    env_vars: Option<HashMap<String, String>>,
+    persistent_volume_path: Option<String>,
+    create_database: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateEnvPayload
+{
+    env_vars: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy)]
@@ -47,7 +59,6 @@ pub struct ParticipantPayload
     participant_id: String,
 }
 
-
 impl ProjectAction
 {
     async fn execute(self, docker: bollard::Docker, container_name: String) -> Result<(), AppError>
@@ -68,6 +79,18 @@ pub async fn deploy_project_handler(
 ) -> Result<impl IntoResponse, AppError>
 {
     validation_service::validate_project_name(&payload.project_name)?;
+
+    if let Some(vars) = &payload.env_vars
+    {
+        validation_service::validate_env_vars(vars)?;
+    }
+
+    let mut persistent_volume_path = payload.persistent_volume_path.clone();
+    if let Some(path) = &persistent_volume_path
+    {
+        validation_service::validate_volume_path(path)?;
+    }
+
     let user_login = claims.sub;
 
     if project_service::check_owner_exists(&state.db_pool, &user_login).await?
@@ -77,6 +100,14 @@ pub async fn deploy_project_handler(
     if project_service::check_project_name_exists(&state.db_pool, &payload.project_name).await?
     {
         return Err(ProjectErrorCode::ProjectNameTaken.into());
+    }
+
+    if payload.create_database.unwrap_or(false) 
+    {
+        if database_service::check_database_exists_for_owner(&state.db_pool, &user_login).await? 
+        {
+            return Err(AppError::DatabaseError(DatabaseErrorCode::DatabaseAlreadyExists));
+        }
     }
 
     let participants: HashSet<String> = payload.participants.into_iter().collect();
@@ -93,6 +124,7 @@ pub async fn deploy_project_handler(
     }
     else if let Some(github_repo_url) = &payload.github_repo_url
     {
+        persistent_volume_path = Some("/var/www/html".to_string());
         let tag = prepare_github_source(&state, &payload.project_name, github_repo_url).await?;
         (ProjectSourceType::Github, github_repo_url.clone(), tag)
     }
@@ -101,11 +133,13 @@ pub async fn deploy_project_handler(
         return Err(AppError::BadRequest("You must provide either an 'image_url' or a 'github_repo_url'.".to_string()));
     };
 
-    let container_name = match docker_service::create_project_container(
+    let (container_name, volume_name) = match docker_service::create_project_container(
         &state.docker_client,
         &payload.project_name,
         &deployed_image_tag,
         &state.config,
+        &payload.env_vars,
+        &persistent_volume_path,
     ).await
     {
         Ok(name) => name,
@@ -118,6 +152,7 @@ pub async fn deploy_project_handler(
     };
 
     let mut tx = state.db_pool.begin().await.map_err(|_| AppError::InternalServerError)?;
+    
     let new_project = match project_service::create_project(
         &mut tx,
         &payload.project_name,
@@ -126,24 +161,60 @@ pub async fn deploy_project_handler(
         source_type,
         &source_url,
         &deployed_image_tag,
+        &payload.env_vars,
+        &persistent_volume_path,
+        &volume_name,
+        &state.config.encryption_key,
     ).await
     {
         Ok(project) => project,
         Err(db_error) =>
         {
             warn!("DB persistence failed, rolling back container and image...");
-            tx.rollback().await.ok();
+            if let Err(e) = tx.rollback().await
+            {
+                error!("Failed to rollback transaction. Trying to remove container and image anyway: {}", e);
+            }
             let docker = state.docker_client.clone();
             let container_name_clone = container_name.clone();
             let deployed_image_tag_clone = deployed_image_tag.clone();
             tokio::spawn(async move
             {
+                // We already log errors inside the functions.
                 let _ = docker_service::remove_container(&docker, &container_name_clone).await;
                 let _ = docker_service::remove_image(&docker, &deployed_image_tag_clone).await;
             });
             return Err(db_error);
         }
     };
+
+    if payload.create_database.unwrap_or(false)
+    {
+        if let Err(db_error) = database_service::provision_and_link_database_tx(
+            &mut tx,
+            &state.mariadb_pool,
+            &user_login,
+            new_project.id,
+            &state.config.encryption_key,
+        ).await
+        {
+            warn!("Database provisioning failed during project creation, rolling back transaction...");
+            if let Err(e) = tx.rollback().await
+            {
+                error!("Failed to rollback transaction. Trying to remove container and image anyway: {}", e);
+            }
+            let docker = state.docker_client.clone();
+            let container_name_clone = container_name.clone();
+            let deployed_image_tag_clone = deployed_image_tag.clone();
+            tokio::spawn(async move
+            {
+                // We already log errors inside the functions.
+                let _ = docker_service::remove_container(&docker, &container_name_clone).await;
+                let _ = docker_service::remove_image(&docker, &deployed_image_tag_clone).await;
+            });
+            return Err(db_error);
+        }
+    }
 
     if let Err(e) = project_service::add_project_participants(&mut tx, new_project.id, &final_participants).await
     {
@@ -156,22 +227,15 @@ pub async fn deploy_project_handler(
 
     info!("Project '{}' by user '{}' created successfully.", payload.project_name, user_login);
 
-
     let mut project_json = serde_json::to_value(new_project).unwrap_or(json!({}));
-
-    if let Some(obj) = project_json.as_object_mut() 
+    if let Some(obj) = project_json.as_object_mut()
     {
         obj.insert("participants".to_string(), json!(final_participants));
     }
 
-    let response_body = json!(
-    {
-        "project": project_json
-    });
-
+    let response_body = json!({ "project": project_json });
     Ok((StatusCode::CREATED, Json(response_body)))
 }
-
 
 async fn prepare_direct_source(state: &AppState, image_url: &str) -> Result<String, AppError>
 {
@@ -180,13 +244,13 @@ async fn prepare_direct_source(state: &AppState, image_url: &str) -> Result<Stri
     
     let pull_result = docker_service::pull_image(&state.docker_client, image_url, None).await;
 
-    if let Err(e) = pull_result 
+    if let Err(e) = pull_result
     {
-        if image_url.starts_with("ghcr.io/") 
+        if image_url.starts_with("ghcr.io/")
         {
-            if let bollard::errors::Error::DockerResponseServerError { status_code, .. } = &e 
+            if let bollard::errors::Error::DockerResponseServerError { status_code, .. } = &e
             {
-                if *status_code == 401 || *status_code == 403 
+                if *status_code == 401 || *status_code == 403
                 {
                     warn!("Failed to pull private image from ghcr.io: {}", image_url);
                     return Err(ProjectErrorCode::GithubPackageNotPublic.into());
@@ -209,7 +273,6 @@ async fn prepare_direct_source(state: &AppState, image_url: &str) -> Result<Stri
     Ok(image_url.to_string())
 }
 
-
 async fn prepare_github_source(
     state: &AppState,
     project_name: &str,
@@ -225,12 +288,11 @@ async fn prepare_github_source(
     
     match github_service::clone_repo(repo_url, temp_dir.path(), None).await
     {
-        Ok(_) => 
+        Ok(_) =>
         {
             info!("Successfully cloned public repository '{}'", repo_url);
         },
-
-          Err(AppError::ProjectError(ProjectErrorCode::GithubAccountNotLinked)) | Err(AppError::BadRequest(_)) =>
+        Err(AppError::ProjectError(ProjectErrorCode::GithubAccountNotLinked)) | Err(AppError::BadRequest(_)) =>
         {
             warn!("Public clone failed for '{}'. Assuming it's a private repo and attempting authenticated clone.", repo_url);
 
@@ -241,7 +303,7 @@ async fn prepare_github_source(
             github_service::clone_repo(repo_url, temp_dir.path(), Some(&token)).await?;
             info!("Successfully cloned private repository '{}' using GitHub App token", repo_url);
         },
-        Err(e) => 
+        Err(e) =>
         {
             return Err(e);
         }
@@ -255,7 +317,6 @@ async fn prepare_github_source(
         .map_err(|_| AppError::InternalServerError)?;
 
     let tarball = docker_service::create_tarball(temp_dir.path())?;
-
     let image_tag = format!("hangar-local/{}:latest", project_name);
     docker_service::build_image_from_tar(&state.docker_client, tarball, &image_tag).await?;
 
@@ -278,26 +339,46 @@ pub async fn purge_project_handler(
     let user_login = claims.sub;
     info!("User '{}' initiated purge for project ID: {}", user_login, project_id);
 
-    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &user_login)
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &user_login, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Project with ID {} not found or you are not the owner.", project_id)))?;
 
     info!("Ownership confirmed. Proceeding with purge for project '{}' (ID: {})", project.name, project.id);
 
+    if let Some(db) = database_service::get_database_by_project_id(&state.db_pool, project_id).await?
+    {
+        info!("Project has a linked database (ID: {}). Deprovisioning it.", db.id);
+        database_service::deprovision_database(
+            &state.db_pool, 
+            &state.mariadb_pool, 
+            db.id, 
+            &user_login
+        ).await?;
+        info!("Linked database deprovisioned successfully.");
+    }
+
     docker_service::remove_container(&state.docker_client, &project.container_name).await?;
+
+    if project.persistent_volume_path.is_some()
+    {
+        let volume_name = match &project.volume_name
+        {
+            Some(name) => name,
+            None => 
+            {
+                error!("Project '{}' has a persistent volume path but no volume name recorded", project.name);
+                return Err(AppError::InternalServerError);
+            }
+        };
+        docker_service::remove_volume_by_name(&state.docker_client, volume_name).await?;
+    }
+
     docker_service::remove_image(&state.docker_client, &project.deployed_image_tag).await?;
     project_service::delete_project_by_id(&state.db_pool, project.id).await?;
 
     info!("Successfully purged project '{}' for user '{}'.", project.name, user_login);
 
-    Ok((
-        StatusCode::OK,
-        Json(json!(
-        {
-            "status": "success",
-            "message": "Project purged successfully."
-        })),
-    ))
+    Ok((StatusCode::OK, Json(json!({ "status": "success", "message": "Project purged successfully." }))))
 }
 
 pub async fn list_owned_projects_handler(
@@ -307,9 +388,7 @@ pub async fn list_owned_projects_handler(
 {
     let user_login = claims.sub;
     info!("Fetching owned projects for user '{}'", user_login);
-
     let projects = project_service::get_projects_by_owner(&state.db_pool, &user_login).await?;
-
     Ok((StatusCode::OK, Json(json!({ "projects": projects }))))
 }
 
@@ -320,9 +399,7 @@ pub async fn list_participating_projects_handler(
 {
     let user_login = claims.sub;
     info!("Fetching projects where user '{}' is a participant", user_login);
-
     let projects = project_service::get_participating_projects(&state.db_pool, &user_login).await?;
-
     Ok((StatusCode::OK, Json(json!({ "projects": projects }))))
 }
 
@@ -335,10 +412,17 @@ pub async fn get_project_details_handler(
     let user_login = claims.sub;
     debug!("User '{}' fetching details for project ID: {}", user_login, project_id);
 
-    match project_service::get_project_by_id_for_user(&state.db_pool, project_id, &user_login).await?
+    match project_service::get_project_by_id_for_user(&state.db_pool, project_id, &user_login, claims.is_admin).await?
     {
-        Some(project) =>
+        Some(mut project) =>
         {
+            if let Some(env_vars_value) = &project.env_vars
+            {
+                let encrypted_vars: HashMap<String, String> = serde_json::from_value(env_vars_value.clone()).unwrap_or_default();
+                let decrypted_vars = decrypt_env_vars(&encrypted_vars, &state.config.encryption_key)?;
+                project.env_vars = Some(serde_json::to_value(decrypted_vars).unwrap());
+            }
+
             let participants = project_service::get_project_participants(&state.db_pool, project.id).await?;
             let response = ProjectDetailsResponse { project, participants };
             Ok((StatusCode::OK, Json(json!({ "project": response }))))
@@ -357,12 +441,10 @@ pub async fn get_project_status_handler(
     Path(project_id): Path<i32>,
 ) -> Result<impl IntoResponse, AppError>
 {
-    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub)
+    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or access denied.".to_string()))?;
-
     let status = docker_service::get_container_status(&state.docker_client, &project.container_name).await?;
-
     Ok(Json(json!({ "status": status.and_then(|s| s.status) })))
 }
 
@@ -373,19 +455,16 @@ async fn project_control_handler(
     action: ProjectAction,
 ) -> Result<impl IntoResponse, AppError>
 {
-    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &claims.sub)
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &claims.sub, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
-
     let status = docker_service::get_container_status(&state.docker_client, &project.container_name).await?;
     if status.is_none() && matches!(action, ProjectAction::Start | ProjectAction::Restart)
     {
         warn!("Container '{}' not found for project ID {}. It might be lost.", project.container_name, project.id);
         return Err(AppError::NotFound(format!("Container for project '{}' seems to be lost. Please contact support or try to redeploy.", project.name)));
     }
-
     action.execute(state.docker_client.clone(), project.container_name).await?;
-
     Ok(StatusCode::OK)
 }
 
@@ -422,12 +501,10 @@ pub async fn get_project_logs_handler(
     Path(project_id): Path<i32>,
 ) -> Result<impl IntoResponse, AppError>
 {
-    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub)
+    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or access denied.".to_string()))?;
-
     let logs = docker_service::get_container_logs(&state.docker_client, &project.container_name, "200").await?;
-
     Ok(Json(json!({ "logs": logs })))
 }
 
@@ -437,16 +514,13 @@ pub async fn get_project_metrics_handler(
     Path(project_id): Path<i32>,
 ) -> Result<Json<ProjectMetrics>, AppError>
 {
-    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub)
+    let project = project_service::get_project_by_id_for_user(&state.db_pool, project_id, &claims.sub, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or access denied.".to_string()))?;
-
     debug!("Fetching metrics for container '{}' (Project ID: {})", project.container_name, project.id);
     let metrics = docker_service::get_container_metrics(&state.docker_client, &project.container_name).await?;
-
     Ok(Json(metrics))
 }
-
 
 pub async fn update_project_image_handler(
     State(state): State<AppState>,
@@ -458,7 +532,7 @@ pub async fn update_project_image_handler(
     let user_login = &claims.sub;
     info!("User '{}' initiated image update for project ID: {}", user_login, project_id);
 
-    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login)
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
 
@@ -469,14 +543,25 @@ pub async fn update_project_image_handler(
     
     let new_image_tag = &payload.new_image_url;
     prepare_direct_source(&state, new_image_tag).await?;
-
     docker_service::remove_container(&state.docker_client, &project.container_name).await?;
+
+    let decrypted_env_vars = if let Some(env_vars_value) = &project.env_vars
+    {
+        let encrypted_vars: HashMap<String, String> = serde_json::from_value(env_vars_value.clone()).unwrap_or_default();
+        Some(decrypt_env_vars(&encrypted_vars, &state.config.encryption_key)?)
+    }
+    else
+    {
+        None
+    };
 
     if let Err(creation_error) = docker_service::create_project_container(
         &state.docker_client,
         &project.name,
         new_image_tag,
         &state.config,
+        &decrypted_env_vars,
+        &project.persistent_volume_path,
     ).await
     {
         error!("Failed to create new container for project '{}' during update. The service is now down.", project.name);
@@ -499,7 +584,6 @@ pub async fn update_project_image_handler(
     });
 
     info!("Project '{}' image updated successfully by user '{}'.", project.name, user_login);
-
     Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Project image updated successfully."}))))
 }
 
@@ -513,7 +597,7 @@ pub async fn add_participant_handler(
     let user_login = &claims.sub;
     info!("User '{}' trying to add participant '{}' to project {}", user_login, payload.participant_id, project_id);
 
-    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login)
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
 
@@ -537,7 +621,7 @@ pub async fn remove_participant_handler(
     let user_login = &claims.sub;
     info!("User '{}' trying to remove participant '{}' from project {}", user_login, participant_id, project_id);
 
-    project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login)
+    project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login, claims.is_admin)
         .await?
         .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
 
@@ -545,4 +629,64 @@ pub async fn remove_participant_handler(
 
     info!("Participant '{}' removed successfully from project {}", participant_id, project_id);
     Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Participant removed."}))))
+}
+
+pub async fn update_env_vars_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+    Json(payload): Json<UpdateEnvPayload>,
+) -> Result<impl IntoResponse, AppError>
+{
+    let user_login = &claims.sub;
+    info!("User '{}' updating environment variables for project ID: {}", user_login, project_id);
+
+    validation_service::validate_env_vars(&payload.env_vars)?;
+
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, user_login, claims.is_admin)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
+
+    docker_service::remove_container(&state.docker_client, &project.container_name).await?;
+
+    let new_env_vars = Some(payload.env_vars.clone());
+    if let Err(creation_error) = docker_service::create_project_container(
+        &state.docker_client,
+        &project.name,
+        &project.deployed_image_tag,
+        &state.config,
+        &new_env_vars,
+        &project.persistent_volume_path,
+    ).await
+    {
+        error!("Failed to recreate container for project '{}' during env update. The service is down.", project.name);
+        return Err(creation_error);
+    }
+
+    project_service::update_project_env_vars(
+        &state.db_pool,
+        project.id,
+        &payload.env_vars,
+        &state.config.encryption_key,
+    ).await?;
+
+    info!("Project '{}' environment variables updated and container recreated.", project.name);
+
+    Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Environment variables updated successfully. The project has been restarted."}))))
+}
+
+fn decrypt_env_vars(
+    encrypted_vars: &HashMap<String, String>,
+    key: &[u8],
+) -> Result<HashMap<String, String>, AppError>
+{
+    encrypted_vars.iter()
+        .map(|(k, v_b64)|
+        {
+            let encrypted_val = BASE64_STANDARD.decode(v_b64)
+                .map_err(|_| AppError::InternalServerError)?;
+            let decrypted_val = crypto_service::decrypt(&encrypted_val, key)?;
+            Ok((k.clone(), decrypted_val))
+        })
+        .collect()
 }

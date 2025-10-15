@@ -25,6 +25,13 @@ pub struct Project
     pub source_url: String,
     pub deployed_image_tag: String,
 
+    #[sqlx(default)]
+    pub env_vars: Option<serde_json::Value>,
+    #[sqlx(default)]
+    pub persistent_volume_path: Option<String>,
+    #[sqlx(default)]
+    pub volume_name: Option<String>,
+
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -43,4 +50,22 @@ pub struct ProjectMetrics
     pub cpu_usage: f64,
     pub memory_usage: f64,
     pub memory_limit: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlobalMetrics 
+{
+    pub total_projects: i64,
+    pub running_containers: u64,
+    pub total_cpu_usage: f64,
+    pub total_memory_usage_mb: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DownProjectInfo 
+{
+    #[serde(flatten)]
+    pub project: Project,
+    pub stopped_at: String,
+    pub downtime_seconds: i64,
 }

@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{error, warn};
-use crate::{error::{AppError, ProjectErrorCode}, model::project::{Project, ProjectSourceType}};
+use crate::{error::{AppError, ProjectErrorCode}, model::project::{Project, ProjectSourceType}, services::crypto_service};
+use base64::prelude::*;
 
 pub async fn check_project_name_exists(pool: &PgPool, name: &str) -> Result<bool, AppError> 
 {
@@ -30,12 +32,25 @@ pub async fn create_project<'a>(
     source_type: ProjectSourceType,
     source_url: &str,
     deployed_image_tag: &str,
+    env_vars: &Option<HashMap<String, String>>,
+    persistent_volume_path: &Option<String>,
+    volume_name: &Option<String>,
+    encryption_key: &[u8]
 ) -> Result<Project, AppError> 
 {
+    let encrypted_env_vars = match env_vars
+    {
+        Some(vars) => Some(encrypt_env_vars(vars, encryption_key)?),
+        None => None,
+    };
+
+    let env_vars_json = encrypted_env_vars.as_ref().map(serde_json::to_value).transpose()
+        .map_err(|_| AppError::InternalServerError)?;
+
     let project = sqlx::query_as::<_, Project>(
-        "INSERT INTO projects (name, owner, container_name, source_type, source_url, deployed_image_tag)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at",
+        "INSERT INTO projects (name, owner, container_name, source_type, source_url, deployed_image_tag, env_vars, persistent_volume_path, volume_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at, env_vars, persistent_volume_path, volume_name",
     )
     .bind(name)
     .bind(owner)
@@ -43,6 +58,9 @@ pub async fn create_project<'a>(
     .bind(source_type)
     .bind(source_url)
     .bind(deployed_image_tag)
+    .bind(env_vars_json)
+    .bind(persistent_volume_path)
+    .bind(volume_name)
     .fetch_one(&mut **tx)
     .await
     .map_err(|e: sqlx::Error| 
@@ -81,7 +99,7 @@ pub async fn delete_project_by_id(pool: &PgPool, project_id: i32) -> Result<(), 
     Ok(())
 }
 
-const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at FROM projects";
+const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at, env_vars, persistent_volume_path FROM projects";
 
 pub async fn get_projects_by_owner(pool: &PgPool, owner: &str) -> Result<Vec<Project>, AppError> 
 {
@@ -101,8 +119,23 @@ pub async fn get_project_by_id_and_owner(
     pool: &PgPool,
     project_id: i32,
     owner: &str,
+    is_admin: bool,
 ) -> Result<Option<Project>, AppError> 
 {
+    if is_admin 
+    {
+        let query = format!("{} WHERE id = $1", SELECT_PROJECT_FIELDS);
+        return sqlx::query_as::<_, Project>(&query)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| 
+            {
+                error!("Admin failed to fetch project by id {}: {}", project_id, e);
+                AppError::InternalServerError
+            });
+    }
+
     let query = format!("{} WHERE id = $1 AND owner = $2", SELECT_PROJECT_FIELDS);
     sqlx::query_as::<_, Project>(&query)
         .bind(project_id)
@@ -139,8 +172,22 @@ pub async fn get_project_by_id_for_user(
     pool: &PgPool,
     project_id: i32,
     user_login: &str,
+    is_admin: bool,
 ) -> Result<Option<Project>, AppError> 
 {
+    if is_admin 
+    {
+        return sqlx::query_as::<_, Project>(&format!("{} WHERE id = $1", SELECT_PROJECT_FIELDS))
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| 
+            {
+                error!("Failed to fetch project {} for admin '{}': {}", project_id, user_login, e);
+                AppError::InternalServerError
+            });
+    }
+
     sqlx::query_as::<_, Project>(
         "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.deployed_image_tag, p.created_at
          FROM projects p
@@ -167,6 +214,19 @@ pub async fn get_project_participants(pool: &PgPool, project_id: i32) -> Result<
         .map_err(|e| 
         {
             error!("Failed to fetch participants for project {}: {}", project_id, e);
+            AppError::InternalServerError
+        })
+}
+
+pub async fn get_all_projects(pool: &PgPool) -> Result<Vec<Project>, AppError> 
+{
+    let query = format!("{} ORDER BY created_at DESC", SELECT_PROJECT_FIELDS);
+    sqlx::query_as::<_, Project>(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| 
+        {
+            error!("Failed to fetch all projects: {}", e);
             AppError::InternalServerError
         })
 }
@@ -271,5 +331,42 @@ pub async fn remove_participant_from_project(
         warn!("Attempted to remove non-existent participant '{}' from project {}", participant_id, project_id);
     }
 
+    Ok(())
+}
+
+fn encrypt_env_vars(
+    env_vars: &HashMap<String, String>,
+    key: &[u8],
+) -> Result<HashMap<String, String>, AppError>
+{
+    env_vars.iter()
+        .map(|(k, v)|
+        {
+            let encrypted_val = crypto_service::encrypt(v, key)?;
+            Ok((k.clone(), base64::prelude::BASE64_STANDARD.encode(encrypted_val)))
+        })
+        .collect()
+}
+
+pub async fn update_project_env_vars(
+    pool: &PgPool,
+    project_id: i32,
+    env_vars: &HashMap<String, String>,
+    encryption_key: &[u8],
+) -> Result<(), AppError>
+{
+    let encrypted_vars = encrypt_env_vars(env_vars, encryption_key)?;
+    let env_vars_json = serde_json::to_value(encrypted_vars).map_err(|_| AppError::InternalServerError)?;
+
+    sqlx::query("UPDATE projects SET env_vars = $1 WHERE id = $2")
+        .bind(env_vars_json)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .map_err(|e|
+        {
+            error!("Failed to update env vars for project {}: {}", project_id, e);
+            AppError::InternalServerError
+        })?;
     Ok(())
 }

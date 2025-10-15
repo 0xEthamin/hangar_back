@@ -1,11 +1,12 @@
 use bollard::auth::DockerCredentials;
 use bollard::errors::Error as BollardError;
-use bollard::secret::{ContainerState, ContainerStatsResponse, ResourcesUlimits, RestartPolicy};
+use bollard::secret::{ContainerState, ContainerStatsResponse, Mount, MountTypeEnum, ResourcesUlimits, RestartPolicy};
+use bollard::models::VolumeCreateOptions;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::
 {
-    BuildImageOptions, CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, LogsOptions, RemoveContainerOptions, RemoveImageOptions, RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions
+    BuildImageOptions, CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions, RemoveImageOptions, RemoveVolumeOptions, RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -18,7 +19,8 @@ use std::process::Stdio;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, ProjectErrorCode};
-use crate::model::project::ProjectMetrics;
+use crate::model::project::{GlobalMetrics, ProjectMetrics};
+use bollard::models::ContainerInspectResponse;
 
 pub async fn pull_image(docker: &Docker, image_url: &str, credentials: Option<DockerCredentials>) -> Result<(), BollardError> 
 {
@@ -93,10 +95,46 @@ pub async fn scan_image_with_grype(image_url: &str, config: &crate::config::Conf
     Ok(())
 }
 
-pub async fn create_project_container(docker: &Docker, project_name: &str, image_tag: &str, config: &crate::config::Config) -> Result<String, AppError> 
+pub async fn create_project_container(
+    docker: &Docker,
+    project_name: &str,
+    image_tag: &str,
+    config: &crate::config::Config,
+    env_vars: &Option<HashMap<String, String>>,
+    persistent_volume_path: &Option<String>,
+) -> Result<(String, Option<String>), AppError>
 {
     let container_name = format!("{}-{}", &config.app_prefix, project_name);
     let hostname = format!("{}.{}", project_name, &config.app_domain_suffix);
+
+    let mut mounts = vec![];
+    let mut volume_name_created: Option<String> = None;
+    if let Some(path) = persistent_volume_path
+    {
+        let volume_name = format!("hangar-data-{}", project_name);
+
+        let options = VolumeCreateOptions
+        {
+            name: Some(volume_name.clone()),
+            driver: Some("local".to_string()),
+            ..Default::default()
+        };
+        docker.create_volume(options).await.map_err(|e|
+        {
+            error!("Failed to create Docker volume '{}': {}", volume_name, e);
+            ProjectErrorCode::ContainerCreationFailed
+        })?;
+
+        volume_name_created = Some(volume_name.clone());
+
+        mounts.push(Mount
+        {
+            target: Some(path.clone()),
+            source: Some(volume_name),
+            typ: Some(MountTypeEnum::VOLUME),
+            ..Default::default()
+        });
+    }
 
     let host_config = HostConfig 
     {
@@ -121,14 +159,19 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
             ResourcesUlimits { name: Some("nproc".to_string()), soft: Some(512), hard: Some(1024) }
         ]),
         
-        // Montages sécurisés
         tmpfs: Some(HashMap::from([
             ("/tmp".to_string(), "rw,noexec,nosuid,size=100m".to_string())
         ])),
         oom_kill_disable: Some(false),
         memory_swappiness: Some(0),
+        mounts: Some(mounts),
         ..Default::default()
     };
+
+    let env = env_vars.as_ref().map(|vars|
+    {
+        vars.iter().map(|(k, v)| format!("{}={}", k, v)).collect()
+    });
 
     let mut labels = HashMap::new();
     labels.insert("app".to_string(), config.app_prefix.clone());
@@ -143,6 +186,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
         image: Some(image_tag.to_string()),
         host_config: Some(host_config),
         labels: Some(labels),
+        env,
         ..Default::default()
     };
 
@@ -178,7 +222,7 @@ pub async fn create_project_container(docker: &Docker, project_name: &str, image
     })?;
 
     info!("Container '{}' created and started with ID: {}", container_name, response.id);
-    Ok(container_name)
+    Ok((container_name, volume_name_created))
 }
 
 pub async fn remove_container(docker: &Docker, container_name: &str) -> Result<(), AppError> 
@@ -234,6 +278,30 @@ pub async fn remove_image(docker: &Docker, image_url: &str) -> Result<(), AppErr
     {
         info!("Image {} successfully removed", image_url);
         Ok(())
+    }
+}
+
+pub async fn remove_volume_by_name(docker: &Docker, volume_name: &str) -> Result<(), AppError>
+{
+    info!("Attempting to remove volume: {}", volume_name);
+    let options = Some(RemoveVolumeOptions { force: true });
+    match docker.remove_volume(volume_name, options).await
+    {
+        Ok(_) =>
+        {
+            info!("Volume {} successfully removed.", volume_name);
+            Ok(())
+        }
+        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 =>
+        {
+            warn!("Volume {} not found during removal. It might have been deleted already.", volume_name);
+            Ok(())
+        }
+        Err(e) =>
+        {
+            error!("Error removing volume {}: {}", volume_name, e);
+            Err(AppError::InternalServerError)
+        }
     }
 }
 
@@ -466,4 +534,82 @@ pub async fn build_image_from_tar(
 
     info!("Image '{}' built successfully.", image_tag);
     Ok(())
+}
+
+pub async fn get_global_container_stats(docker: &Docker, app_prefix: &str) -> Result<GlobalMetrics, AppError> 
+{
+    let mut filters = HashMap::new();
+    filters.insert("label".to_string(), vec![format!("app={}", app_prefix)]);
+
+    let options = Some(ListContainersOptions 
+    {
+        all: true,
+        filters: Some(filters),
+        ..Default::default()
+    });
+
+    let containers = docker.list_containers(options).await.map_err(|e| 
+    {
+        error!("Failed to list hangar containers: {}", e);
+        AppError::InternalServerError
+    })?;
+
+    let mut running_containers = 0;
+    let mut total_cpu_usage = 0.0;
+    let mut total_memory_usage = 0;
+
+    for container_summary in containers 
+    {
+        if let Some(state) = container_summary.state 
+        {
+            if state.to_string() == "running" 
+            {
+                if let Some(id) = container_summary.id 
+                {
+                    let mut stream = docker.stats(&id, Some(StatsOptions { stream: false, ..Default::default() }));
+                    if let Some(stats_result) = stream.next().await 
+                    {
+                        match stats_result 
+                        {
+                            Ok(stats) => 
+                            {
+                                running_containers += 1;
+                                total_cpu_usage += calculate_cpu_percent(&stats);
+                                let (mem_usage, _) = calculate_memory(&stats);
+                                total_memory_usage += mem_usage;
+                            }
+                            Err(e) => {
+                                warn!("Could not get stats for running container {}: {}", id, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(GlobalMetrics 
+    {
+        total_projects: 0,
+        running_containers,
+        total_cpu_usage,
+        total_memory_usage_mb: (total_memory_usage as f64) / (1024.0 * 1024.0),
+    })
+}
+
+pub async fn inspect_container_details(docker: &Docker, container_name: &str) -> Result<Option<ContainerInspectResponse>, AppError> 
+{
+    match docker.inspect_container(container_name, None::<InspectContainerOptions>).await 
+    {
+        Ok(details) => Ok(Some(details)),
+        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 => 
+        {
+            Ok(None)
+        },
+        Err(e) => 
+        {
+            error!("Failed to inspect container '{}': {}", container_name, e);
+            Err(AppError::InternalServerError)
+        }
+    }
 }

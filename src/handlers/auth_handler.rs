@@ -28,12 +28,15 @@ pub async fn auth_callback_handler(State(state): State<AppState>,
     tracing::debug!("Validating CAS ticket at URL: {}", url);
     let user = crate::services::auth_service::validate_ticket(&url, &state.http_client).await?;
 
+    let is_admin = state.config.admin_logins.contains(&user.login);
+
     let token = crate::services::jwt::generate_jwt(
         &state.config.jwt_secret,
         state.config.jwt_expiration_seconds,
         &user.login,
         &user.name,
         &user.email,
+        is_admin,
     )?;
 
     let cookie = Cookie::build(("auth_token", token.to_string()))
@@ -55,7 +58,8 @@ pub async fn auth_callback_handler(State(state): State<AppState>,
                     {
                         "login": user.login,
                         "name": user.name,
-                        "email": user.email
+                        "email": user.email,
+                        "is_admin": is_admin
                     }
                 }
             )
@@ -76,6 +80,7 @@ pub async fn get_current_user_handler(claims: Claims) -> impl IntoResponse
                     "login": claims.sub,
                     "name": claims.name,
                     "email": claims.email,
+                    "is_admin": claims.is_admin
                     
                 }
             }

@@ -12,6 +12,7 @@ use crate::state::InnerState;
 
 use std::net::{SocketAddr, Ipv4Addr};
 use sqlx::postgres::PgPoolOptions;
+use sqlx::mysql::MySqlPoolOptions;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -57,6 +58,21 @@ async fn main()
         }
     }
 
+    let mariadb_pool = match MySqlPoolOptions::new().max_connections(config.db_max_connections).connect(&config.mariadb_url).await
+    {
+        Ok(pool) => 
+        {
+            info!("✅ MariaDB connection pool created successfully.");
+            pool
+        }
+        Err(e) => 
+        {
+            tracing::error!("❌ Failed to create MariaDB connection pool: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+
     let docker_client = match bollard::Docker::connect_with_local_defaults() 
     {
         Ok(client) => client,
@@ -67,7 +83,7 @@ async fn main()
         }
     };
 
-    let app_state = InnerState::new(config.clone(), docker_client, db_pool);
+    let app_state = InnerState::new(config.clone(), docker_client, db_pool, mariadb_pool);
     let app = router::create_router(app_state);
 
     let addr = SocketAddr::from((config.host.parse::<Ipv4Addr>().unwrap(), config.port));
