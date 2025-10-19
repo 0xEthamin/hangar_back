@@ -130,7 +130,16 @@ pub async fn deploy_project_handler(
 
     let deployment_source = prepare_deployment_source(&state, &payload).await?;
 
-    let deployed_image_digest = get_image_digest(&state, &deployment_source.image_tag).await?;
+    let deployed_image_digest = match get_image_digest(&state, &deployment_source.image_tag).await 
+    {
+        Ok(digest) => digest,
+        Err(e) => 
+        {
+            error!("Failed to retrieve image digest for '{}': {}", &deployment_source.image_tag, e);
+            remove_image_best_effort(&state, &deployment_source.image_tag).await;
+            return Err(AppError::InternalServerError);
+        }
+    };
 
     let container_name = format!("{}-{}", state.config.app_prefix, payload.project_name);
     

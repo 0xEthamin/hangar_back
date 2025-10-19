@@ -1,3 +1,4 @@
+#!/bin/sh
 set -e
 
 HANGAR_WEBROOT_DIR="${HANGAR_WEBROOT_DIR:-/var/www/html}"

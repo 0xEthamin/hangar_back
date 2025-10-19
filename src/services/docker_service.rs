@@ -651,12 +651,13 @@ pub async fn get_image_digest(docker: &Docker, image_tag: &str) -> Result<Option
     {
         Ok(details) => 
         {
-            if let Some(digests) = details.repo_digests 
+            if let Some(id) = details.id 
             {
-                Ok(digests.into_iter().next())
+                Ok(Some(id))
             } 
             else 
             {
+                warn!("No ID found for image '{}'", image_tag);
                 Ok(None)
             }
         },
