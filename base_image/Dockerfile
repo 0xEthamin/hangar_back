@@ -55,8 +55,12 @@ RUN { \
 
 
 COPY config/nginx.conf /etc/nginx/nginx.conf
-COPY config/default.conf /etc/nginx/http.d/default.conf
+COPY config/default.conf.template /etc/nginx/http.d/default.conf.template
 COPY config/supervisord.conf /etc/supervisord.conf
+COPY config/configure-webroot.sh /usr/local/bin/configure-webroot.sh
+
+
+RUN chmod +x /usr/local/bin/configure-webroot.sh
 
 RUN addgroup -g 1000 appgroup && \
     adduser -u 1000 -D -G appgroup appuser
@@ -75,4 +79,4 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://127.0.0.1/ || exit 1
 
-ENTRYPOINT ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+ENTRYPOINT ["/usr/local/bin/configure-webroot.sh"]

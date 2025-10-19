@@ -195,11 +195,12 @@ pub async fn get_installation_token(installation_id: u64, http_client: &reqwest:
     Ok(token_response.token)
 }
 
-pub async fn clone_repo(repo_url: &str, target_dir: &Path, token: Option<&str>) -> Result<(), AppError>
+pub async fn clone_repo(repo_url: &str, target_dir: &Path, token: Option<&str>, branch: Option<&str>) -> Result<(), AppError>
 {
     let repo_url_owned = repo_url.to_string();
     let target_dir = target_dir.to_path_buf();
     let token = token.map(|s| s.to_string());
+    let branch = branch.map(|s| s.to_string());
 
     let repo_url_for_log = repo_url_owned.clone();
 
@@ -221,6 +222,11 @@ pub async fn clone_repo(repo_url: &str, target_dir: &Path, token: Option<&str>) 
 
         let mut builder = RepoBuilder::new();
         builder.fetch_options(fo);
+
+        if let Some(b) = &branch
+        {
+            builder.branch(b);
+        }
 
         builder.clone(&repo_url_owned, &target_dir)
     })

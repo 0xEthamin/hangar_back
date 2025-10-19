@@ -30,8 +30,6 @@ pub fn create_router(state: AppState) -> Router
 
     let public_routes = Router::new()
         .route("/api/health", get(handlers::health::health_check_handler))
-        .route("/api/error", get(handlers::health::error_check_handler))
-        .route("/api/not-found", get(handlers::health::not_found_handler))
         .route("/api/auth/callback", get(handlers::auth_handler::auth_callback_handler))
         .route_layer(common_layer.clone());
 
@@ -54,6 +52,7 @@ pub fn create_router(state: AppState) -> Router
         .route("/api/databases/{db_id}", delete(handlers::database_handler::delete_my_database_handler))
         .route("/api/projects/{project_id}/database/{db_id}", put(handlers::database_handler::link_database_handler))
         .route("/api/projects/{project_id}/database", delete(handlers::database_handler::unlink_database_handler))
+        .route("/api/projects/{project_id}/database/delete", delete(handlers::database_handler::delete_linked_database_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(common_layer.clone());
 
@@ -62,6 +61,7 @@ pub fn create_router(state: AppState) -> Router
         .route("/api/projects/{project_id}", delete(handlers::project_handler::purge_project_handler))
         .route("/api/projects/{project_id}/image", put(handlers::project_handler::update_project_image_handler))
         .route("/api/projects/{project_id}/env", put(handlers::project_handler::update_env_vars_handler))
+        .route("/api/projects/{project_id}/rebuild", put(handlers::project_handler::rebuild_project_handler))
         .route_layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth))
         .route_layer(long_running_layer);
 

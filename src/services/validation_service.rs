@@ -82,3 +82,28 @@ pub fn validate_volume_path(path: &str) -> Result<(), AppError>
 
     Ok(())
 }
+
+pub fn validate_source_root_dir(path: &str) -> Result<(), AppError> 
+{
+    if path.contains("..") || path.starts_with('/') || path.starts_with('\\') 
+    {
+        return Err(ProjectErrorCode::InvalidSourceRootDir.into());
+    }
+
+    let normalized = std::path::Path::new(path);
+    for component in normalized.components() 
+    {
+        if let std::path::Component::ParentDir = component 
+        {
+            return Err(ProjectErrorCode::InvalidSourceRootDir.into());
+        }
+    }
+
+    const FORBIDDEN_DIRS: &[&str] = &[".git", ".env", ".ssh"];
+    if FORBIDDEN_DIRS.iter().any(|&forbidden| path.contains(forbidden))
+    {
+        return Err(ProjectErrorCode::InvalidSourceRootDir.into());
+    }
+    
+    Ok(())
+}

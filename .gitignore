@@ -1,3 +1,4 @@
 /target
 .env
 postgresql_data
+mariadb_data

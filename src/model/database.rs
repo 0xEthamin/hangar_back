@@ -15,7 +15,7 @@ pub struct Database
     pub created_at: OffsetDateTime,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct DatabaseDetailsResponse
 {
     pub id: i32,

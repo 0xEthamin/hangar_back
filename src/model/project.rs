@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::Type)]
+use crate::model::database::DatabaseDetailsResponse;
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, sqlx::Type)]
 #[sqlx(type_name = "project_source_type", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectSourceType 
@@ -23,7 +25,12 @@ pub struct Project
     pub source: ProjectSourceType,
 
     pub source_url: String,
+    #[sqlx(default)]
+    pub source_branch: Option<String>,
+    #[sqlx(default)]
+    pub source_root_dir: Option<String>,
     pub deployed_image_tag: String,
+    pub deployed_image_digest: String,
 
     #[sqlx(default)]
     pub env_vars: Option<serde_json::Value>,
@@ -36,12 +43,13 @@ pub struct Project
     pub created_at: OffsetDateTime,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ProjectDetailsResponse 
 {
     #[serde(flatten)]
     pub project: Project,
     pub participants: Vec<String>,
+    pub database: Option<DatabaseDetailsResponse>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

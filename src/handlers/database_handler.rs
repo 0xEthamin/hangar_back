@@ -66,9 +66,33 @@ pub async fn delete_my_database_handler(
         &state.mariadb_pool,
         db_id,
         &claims.sub,
+        claims.is_admin
     ).await?;
 
     Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Database deleted successfully."}))))
+}
+
+pub async fn delete_linked_database_handler(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(project_id): Path<i32>,
+) -> Result<impl IntoResponse, AppError>
+{
+    project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &claims.sub, claims.is_admin).await?
+    .ok_or(AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
+
+    let db = database_service::get_database_by_project_id(&state.db_pool, project_id).await?
+        .ok_or(AppError::NotFound("No database linked to this project.".to_string()))?;
+
+    database_service::deprovision_database(
+        &state.db_pool,
+        &state.mariadb_pool,
+        db.id,
+        &db.owner_login,
+        claims.is_admin,
+    ).await?;
+
+    Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Linked database deleted successfully."}))))
 }
 
 pub async fn link_database_handler(
@@ -78,14 +102,14 @@ pub async fn link_database_handler(
 ) -> Result<impl IntoResponse, AppError>
 {
     let project = project_service::get_project_by_id_and_owner(
-        &state.db_pool, project_id, &claims.sub, false
+        &state.db_pool, project_id, &claims.sub, claims.is_admin
     ).await?.ok_or(AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
 
     let database = database_service::get_database_by_id_and_owner(
-        &state.db_pool, db_id, &claims.sub
+        &state.db_pool, db_id, &claims.sub, claims.is_admin
     ).await?.ok_or(AppError::NotFound("Database not found or you are not the owner.".to_string()))?;
 
-    database_service::link_database_to_project(&state.db_pool, database.id, project.id, &claims.sub).await?;
+    database_service::link_database_to_project(&state.db_pool, database.id, project.id, &database.owner_login).await?;
 
     Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Database linked to project successfully."}))))
 }
@@ -96,10 +120,10 @@ pub async fn unlink_database_handler(
     Path(project_id): Path<i32>,
 ) -> Result<impl IntoResponse, AppError>
 {
-    project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &claims.sub, false).await?
+    let project = project_service::get_project_by_id_and_owner(&state.db_pool, project_id, &claims.sub, claims.is_admin).await?
     .ok_or(AppError::NotFound("Project not found or you are not the owner.".to_string()))?;
 
-    database_service::unlink_database_from_project(&state.db_pool, project_id, &claims.sub).await?;
+    database_service::unlink_database_from_project(&state.db_pool, project_id, &project.owner).await?;
     
     Ok((StatusCode::OK, Json(json!({"status": "success", "message": "Database unlinked from project successfully."}))))
 }

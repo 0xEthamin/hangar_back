@@ -32,27 +32,19 @@ pub async fn pull_image(docker: &Docker, image_url: &str, credentials: Option<Do
 
     let mut stream = docker.create_image(options, None, credentials);
 
+    info!("Pulling image {}", image_url);
     while let Some(result) = stream.next().await 
     {
         match result 
         {
             Ok(info) => 
             {
-                if let Some(error_detail) = info.error_detail 
-                {
-                    if let Some(message) = error_detail.message 
-                    {
-                        if message.to_lowercase().contains("unauthorized") || message.to_lowercase().contains("authentication required") 
+                if let Some(error_detail) = info.error_detail
+                    && let Some(message) = error_detail.message
+                        && (message.to_lowercase().contains("unauthorized") || message.to_lowercase().contains("authentication required")) 
                         {
                             warn!("Authentication error during image pull for '{}': {}", image_url, message);
                         }
-                    }
-                }
-
-                if let Some(status) = info.status 
-                {
-                    tracing::debug!("Pulling image {}: {}", image_url, status);
-                }
             }
             Err(e) => 
             {
@@ -97,14 +89,14 @@ pub async fn scan_image_with_grype(image_url: &str, config: &crate::config::Conf
 
 pub async fn create_project_container(
     docker: &Docker,
+    container_name: &str,
     project_name: &str,
-    image_tag: &str,
+    image_identifier: &str,
     config: &crate::config::Config,
     env_vars: &Option<HashMap<String, String>>,
     persistent_volume_path: &Option<String>,
-) -> Result<(String, Option<String>), AppError>
+) -> Result<Option<String>, AppError>
 {
-    let container_name = format!("{}-{}", &config.app_prefix, project_name);
     let hostname = format!("{}.{}", project_name, &config.app_domain_suffix);
 
     let mut mounts = vec![];
@@ -183,7 +175,7 @@ pub async fn create_project_container(
 
     let config = ContainerCreateBody 
     {
-        image: Some(image_tag.to_string()),
+        image: Some(image_identifier.to_string()),
         host_config: Some(host_config),
         labels: Some(labels),
         env,
@@ -195,6 +187,22 @@ pub async fn create_project_container(
     let response = docker.create_container(options, config).await.map_err(|e| 
     {
         error!("Failed to create container '{}': {}", container_name, e);
+        let docker_clone = docker.clone();
+        let volume_to_cleanup = volume_name_created.clone();
+        tokio::spawn(async move 
+        {
+            if let Some(vol) = volume_to_cleanup 
+            {
+                if let Err(e) = remove_volume_by_name(&docker_clone, &vol).await 
+                {
+                    error!("ROLLBACK FAILED: Could not remove volume '{}' after container start failure: {}", vol, e);
+                } 
+                else 
+                {
+                    info!("Rollback successful for volume '{}'", vol);
+                }
+            }
+        });
         ProjectErrorCode::ContainerCreationFailed
     })?;
 
@@ -203,8 +211,8 @@ pub async fn create_project_container(
         error!("Failed to start container '{}': {}", container_name, e);
         
         let docker_clone = docker.clone();
-        let container_name_clone = container_name.clone();
-        
+        let container_name_clone = container_name.to_string();
+        let volume_to_cleanup = volume_name_created.clone();
         tokio::spawn(async move 
         {
             warn!("Attempting rollback for failed container start: {}", container_name_clone);
@@ -216,13 +224,25 @@ pub async fn create_project_container(
             {
                 info!("Rollback successful for container '{}'", container_name_clone);
             }
+
+            if let Some(vol) = volume_to_cleanup 
+            {
+                if let Err(e) = remove_volume_by_name(&docker_clone, &vol).await 
+                {
+                    error!("ROLLBACK FAILED: Could not remove volume '{}' after container start failure: {}", vol, e);
+                } 
+                else 
+                {
+                    info!("Rollback successful for volume '{}'", vol);
+                }
+            }
         });
         
         ProjectErrorCode::ContainerCreationFailed
     })?;
 
     info!("Container '{}' created and started with ID: {}", container_name, response.id);
-    Ok((container_name, volume_name_created))
+    Ok(volume_name_created)
 }
 
 pub async fn remove_container(docker: &Docker, container_name: &str) -> Result<(), AppError> 
@@ -245,7 +265,7 @@ pub async fn remove_container(docker: &Docker, container_name: &str) -> Result<(
     match docker.remove_container(container_name, None::<RemoveContainerOptions>).await 
     {
         Ok(_) => (),
-        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 => 
+        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => 
         {
             warn!("Container {} not found during removal. It might have been deleted already.", container_name);
         },
@@ -292,7 +312,7 @@ pub async fn remove_volume_by_name(docker: &Docker, volume_name: &str) -> Result
             info!("Volume {} successfully removed.", volume_name);
             Ok(())
         }
-        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 =>
+        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) =>
         {
             warn!("Volume {} not found during removal. It might have been deleted already.", volume_name);
             Ok(())
@@ -310,7 +330,7 @@ pub async fn get_container_status(docker: &Docker, container_name: &str) -> Resu
     match docker.inspect_container(container_name, None::<InspectContainerOptions>).await 
     {
         Ok(details) => Ok(details.state),
-        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 => 
+        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => 
         {
             Ok(None)
         },
@@ -352,6 +372,7 @@ pub async fn restart_container_by_name(docker: &Docker, container_name: &str) ->
 pub async fn get_container_logs(docker: &Docker, container_name: &str, tail: &str) -> Result<String, AppError> 
 {
     info!("Fetching logs for container '{}' with tail '{}'", container_name, tail);
+    const MAX_LOG_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
     let options = Some(LogsOptions 
     {
@@ -365,11 +386,25 @@ pub async fn get_container_logs(docker: &Docker, container_name: &str, tail: &st
     let mut stream = docker.logs(container_name, options);
 
     let mut log_entries = Vec::new();
+    let mut total_size = 0;
+
     while let Some(log_result) = stream.next().await 
     {
         match log_result 
         {
-            Ok(log_output) => log_entries.push(log_output.to_string()),
+            Ok(log_output) => 
+            {
+                let log_str = log_output.to_string();
+                total_size += log_str.len();
+                
+                if total_size > MAX_LOG_SIZE 
+                {
+                    log_entries.push("[...] Logs truncated (exceeded 10MB)".to_string());
+                    break;
+                }
+                
+                log_entries.push(log_str);
+            }
             Err(e) => 
             {
                 error!("Error streaming logs for container '{}': {}", container_name, e);
@@ -560,11 +595,9 @@ pub async fn get_global_container_stats(docker: &Docker, app_prefix: &str) -> Re
 
     for container_summary in containers 
     {
-        if let Some(state) = container_summary.state 
-        {
-            if state.to_string() == "running" 
-            {
-                if let Some(id) = container_summary.id 
+        if let Some(state) = container_summary.state
+            && state.to_string() == "running"
+                && let Some(id) = container_summary.id 
                 {
                     let mut stream = docker.stats(&id, Some(StatsOptions { stream: false, ..Default::default() }));
                     if let Some(stats_result) = stream.next().await 
@@ -584,8 +617,6 @@ pub async fn get_global_container_stats(docker: &Docker, app_prefix: &str) -> Re
                         }
                     }
                 }
-            }
-        }
     }
     
     Ok(GlobalMetrics 
@@ -602,13 +633,41 @@ pub async fn inspect_container_details(docker: &Docker, container_name: &str) ->
     match docker.inspect_container(container_name, None::<InspectContainerOptions>).await 
     {
         Ok(details) => Ok(Some(details)),
-        Err(bollard::errors::Error::DockerResponseServerError { status_code, .. }) if status_code == 404 => 
+        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => 
         {
             Ok(None)
         },
         Err(e) => 
         {
             error!("Failed to inspect container '{}': {}", container_name, e);
+            Err(AppError::InternalServerError)
+        }
+    }
+}
+
+pub async fn get_image_digest(docker: &Docker, image_tag: &str) -> Result<Option<String>, AppError> 
+{
+    match docker.inspect_image(image_tag).await 
+    {
+        Ok(details) => 
+        {
+            if let Some(digests) = details.repo_digests 
+            {
+                Ok(digests.into_iter().next())
+            } 
+            else 
+            {
+                Ok(None)
+            }
+        },
+        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => 
+        {
+            warn!("Image '{}' not found for inspection.", image_tag);
+            Ok(None)
+        },
+        Err(e) => 
+        {
+            error!("Failed to inspect image '{}': {}", image_tag, e);
             Err(AppError::InternalServerError)
         }
     }

@@ -31,7 +31,10 @@ pub async fn create_project<'a>(
     container_name: &str,
     source_type: ProjectSourceType,
     source_url: &str,
+    source_branch: &Option<String>,
+    source_root_dir: &Option<String>,
     deployed_image_tag: &str,
+    deployed_image_digest: &str,
     env_vars: &Option<HashMap<String, String>>,
     persistent_volume_path: &Option<String>,
     volume_name: &Option<String>,
@@ -48,16 +51,19 @@ pub async fn create_project<'a>(
         .map_err(|_| AppError::InternalServerError)?;
 
     let project = sqlx::query_as::<_, Project>(
-        "INSERT INTO projects (name, owner, container_name, source_type, source_url, deployed_image_tag, env_vars, persistent_volume_path, volume_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at, env_vars, persistent_volume_path, volume_name",
+        "INSERT INTO projects (name, owner, container_name, source_type, source_url, source_branch, source_root_dir, deployed_image_tag, deployed_image_digest, env_vars, persistent_volume_path, volume_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, name, owner, container_name, source_type, source_url, source_branch, source_root_dir, deployed_image_tag, deployed_image_digest, created_at, env_vars, persistent_volume_path, volume_name",
     )
     .bind(name)
     .bind(owner)
     .bind(container_name)
     .bind(source_type)
     .bind(source_url)
+    .bind(source_branch)
+    .bind(source_root_dir)
     .bind(deployed_image_tag)
+    .bind(deployed_image_digest)
     .bind(env_vars_json)
     .bind(persistent_volume_path)
     .bind(volume_name)
@@ -66,13 +72,11 @@ pub async fn create_project<'a>(
     .map_err(|e: sqlx::Error| 
     {
         error!("Failed to create project in DB: {}", e);
-        if let Some(db_err) = e.as_database_error() 
-        {
-            if db_err.is_unique_violation() 
+        if let Some(db_err) = e.as_database_error()
+            && db_err.is_unique_violation() 
             {
                 return AppError::ProjectError(ProjectErrorCode::ProjectNameTaken);
             }
-        }
         AppError::InternalServerError
     })?;
 
@@ -99,7 +103,7 @@ pub async fn delete_project_by_id(pool: &PgPool, project_id: i32) -> Result<(), 
     Ok(())
 }
 
-const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type, source_url, deployed_image_tag, created_at, env_vars, persistent_volume_path FROM projects";
+const SELECT_PROJECT_FIELDS: &str = "SELECT id, name, owner, container_name, source_type, source_url, source_branch, source_root_dir, deployed_image_tag, deployed_image_digest, created_at, env_vars, persistent_volume_path, volume_name FROM projects";
 
 pub async fn get_projects_by_owner(pool: &PgPool, owner: &str) -> Result<Vec<Project>, AppError> 
 {
@@ -152,7 +156,7 @@ pub async fn get_project_by_id_and_owner(
 pub async fn get_participating_projects(pool: &PgPool, participant_id: &str) -> Result<Vec<Project>, AppError> 
 {
     sqlx::query_as::<_, Project>(
-        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.deployed_image_tag, p.created_at
+        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.source_branch, p.source_root_dir, p.deployed_image_tag, p.deployed_image_digest, p.created_at, p.env_vars, p.persistent_volume_path, p.volume_name
          FROM projects p
          JOIN project_participants pp ON p.id = pp.project_id
          WHERE pp.participant_id = $1
@@ -189,7 +193,7 @@ pub async fn get_project_by_id_for_user(
     }
 
     sqlx::query_as::<_, Project>(
-        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.deployed_image_tag, p.created_at
+        "SELECT p.id, p.name, p.owner, p.container_name, p.source_type, p.source_url, p.source_branch, p.source_root_dir, p.deployed_image_tag, p.deployed_image_digest, p.created_at, p.env_vars, p.persistent_volume_path, p.volume_name
          FROM projects p
          LEFT JOIN project_participants pp ON p.id = pp.project_id
          WHERE p.id = $1 AND (p.owner = $2 OR pp.participant_id = $2)"
@@ -261,27 +265,6 @@ pub async fn add_project_participants<'a>(
         AppError::InternalServerError
     })?;
 
-    Ok(())
-}
-
-
-pub async fn update_project_image(
-    pool: &PgPool,
-    project_id: i32,
-    new_image_url: &str,
-) -> Result<(), AppError> 
-{
-    sqlx::query("UPDATE projects SET source_url = $1, deployed_image_tag = $2 WHERE id = $3")
-        .bind(new_image_url)
-        .bind(new_image_url)
-        .bind(project_id)
-        .execute(pool)
-        .await
-        .map_err(|e| 
-        {
-            error!("Failed to update project {} with new image: {}", project_id, e);
-            AppError::InternalServerError
-        })?;
     Ok(())
 }
 
@@ -366,6 +349,65 @@ pub async fn update_project_env_vars(
         .map_err(|e|
         {
             error!("Failed to update env vars for project {}: {}", project_id, e);
+            AppError::InternalServerError
+        })?;
+    Ok(())
+}
+
+pub async fn update_project_container_name(
+    pool: &PgPool,
+    project_id: i32,
+    new_container_name: &str,
+) -> Result<(), AppError>
+{
+    sqlx::query("UPDATE projects SET container_name = $1 WHERE id = $2")
+        .bind(new_container_name)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .map_err(|e|
+        {
+            error!("Failed to update container name for project {}: {}", project_id, e);
+            AppError::InternalServerError
+        })?;
+    Ok(())
+}
+
+pub async fn update_project_image_and_digest(
+    pool: &PgPool,
+    project_id: i32,
+    new_image_tag: &str,
+    new_image_digest: &str,
+) -> Result<(), AppError> 
+{
+    sqlx::query("UPDATE projects SET deployed_image_tag = $1, deployed_image_digest = $2 WHERE id = $3")
+        .bind(new_image_tag)
+        .bind(new_image_digest)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .map_err(|e| 
+        {
+            error!("Failed to update project {} with new image and digest: {}", project_id, e);
+            AppError::InternalServerError
+        })?;
+    Ok(())
+}
+
+pub async fn update_project_source_url(
+    pool: &PgPool,
+    project_id: i32,
+    new_source_url: &str,
+) -> Result<(), AppError>
+{
+    sqlx::query("UPDATE projects SET source_url = $1 WHERE id = $2")
+        .bind(new_source_url)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .map_err(|e|
+        {
+            error!("Failed to update source_url for project {}: {}", project_id, e);
             AppError::InternalServerError
         })?;
     Ok(())

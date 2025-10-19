@@ -10,7 +10,7 @@ pub struct Claims
     pub sub: String,
     pub name: String,
     pub email: String,
-    pub exp: usize,
+    pub exp: i64,
     pub is_admin: bool,
 }
 
@@ -22,7 +22,7 @@ pub fn generate_jwt(secret: &str, jwt_expiration_seconds : u64, login: &str, nam
         sub: login.to_string(),
         name: name.to_string(),
         email: email.to_string(),
-        exp: (now + jwt_expiration_seconds) as usize,
+        exp: (now + jwt_expiration_seconds) as i64,
         is_admin,
     };
 

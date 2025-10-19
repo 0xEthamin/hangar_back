@@ -16,12 +16,16 @@ const DB_PREFIX: &str = "hangardb";
 
 fn valid_identifier(s: &str) -> bool 
 {
-    if s.is_empty() 
-    {
-        return false;
-    }
-    let allowed_chars: HashSet<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".chars().collect();
-    s.chars().all(|c| allowed_chars.contains(&c))
+    if s.is_empty() || s.len() > 64 { return false; }
+    
+    // Ne doit pas commencer par un chiffre
+    if s.chars().next().unwrap().is_ascii_digit() { return false; }
+    
+    const RESERVED: &[&str] = &["SELECT", "DROP", "INSERT", "UPDATE", "DELETE", "TABLE", "DATABASE"];
+    if RESERVED.contains(&s.to_uppercase().as_str()) { return false; }
+    
+    let allowed: HashSet<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".chars().collect();
+    s.chars().all(|c| allowed.contains(&c))
 }
 
 pub async fn check_database_exists_for_owner(pool: &PgPool, owner: &str) -> Result<bool, AppError>
@@ -40,8 +44,8 @@ pub async fn check_database_exists_for_owner(pool: &PgPool, owner: &str) -> Resu
 
 fn generate_password() -> String
 {
-    let password = Alphanumeric.sample_string(&mut rand::rng(), 24);
-    password
+    
+    Alphanumeric.sample_string(&mut rand::rng(), 24)
 }
 
 pub async fn provision_database(
@@ -57,7 +61,7 @@ pub async fn provision_database(
     }
 
     let db_name = format!("{}_{}", DB_PREFIX, owner_login);
-    let username = db_name.clone();
+    let username = owner_login.to_string();
     let password = generate_password();
 
     if let Err(e) = execute_mariadb_provisioning(mariadb_pool, &db_name, &username, &password).await
@@ -111,9 +115,10 @@ pub async fn deprovision_database(
     mariadb_pool: &MySqlPool,
     db_id: i32,
     owner_login: &str,
+    is_admin: bool
 ) -> Result<(), AppError>
 {
-    let db_record = get_database_by_id_and_owner(pg_pool, db_id, owner_login).await?
+    let db_record = get_database_by_id_and_owner(pg_pool, db_id, owner_login, is_admin).await?
         .ok_or(DatabaseErrorCode::NotFound)?;
 
     execute_mariadb_deprovisioning(mariadb_pool, &db_record.database_name, &db_record.username).await?;
@@ -128,7 +133,7 @@ pub async fn deprovision_database(
             AppError::InternalServerError // La DB a été supprimée mais pas la métadonnée.
         })?;
 
-    info!("Database ID {} for user '{}' deprovisioned successfully.", db_id, owner_login);
+    info!("Database ID {} for user '{}' deprovisioned successfully.", db_id, db_record.owner_login);
     Ok(())
 }
 
@@ -139,36 +144,53 @@ async fn execute_mariadb_provisioning(
     password: &str,
 ) -> Result<(), AppError> 
 {
-    if !valid_identifier(db_name) || !valid_identifier(username) 
-    {
+    if !valid_identifier(db_name) || !valid_identifier(username) {
+        error!("Invalid database or username identifier: db_name='{}', username='{}'", db_name, username);
         return Err(AppError::BadRequest("Invalid identifier".into()));
     }
 
-    let mut conn = pool.acquire().await.map_err(|_| DatabaseErrorCode::ProvisioningFailed)?;
+    let mut conn = pool.acquire().await.map_err(|e| {
+        error!("Failed to acquire MariaDB connection: {}", e);
+        DatabaseErrorCode::ProvisioningFailed
+    })?;
 
-    sqlx::query(&format!(
+    let create_db_sql = format!(
         "CREATE DATABASE `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci",
         db_name
-    ))
-    .execute(&mut *conn)
-    .await
-    .map_err(|_| DatabaseErrorCode::ProvisioningFailed)?;
-
-    let create_user_sql = format!("CREATE USER `{}`@'%' IDENTIFIED BY ?", username);
-    sqlx::query(&create_user_sql)
-        .bind(password)
+    );
+    sqlx::query(&create_db_sql)
         .execute(&mut *conn)
         .await
-        .map_err(|_| DatabaseErrorCode::ProvisioningFailed)?;
+        .map_err(|e| {
+            error!("Failed to create database '{}': {}", db_name, e);
+            DatabaseErrorCode::ProvisioningFailed
+        })?;
+
+    let escaped_password = password.replace('\'', "\\'");
+    let create_user_sql = format!("CREATE USER `{}`@'%' IDENTIFIED BY '{}'", username, escaped_password);
+    sqlx::query(&create_user_sql)
+        .execute(&mut *conn)
+        .await
+        .map_err(|_|
+        {
+            error!("Failed to create user '{}' (details hidden for security)", username);
+            DatabaseErrorCode::ProvisioningFailed
+        })?;
+
 
     let grant_sql = format!("GRANT ALL PRIVILEGES ON `{}`.* TO `{}`@'%'", db_name, username);
     sqlx::query(&grant_sql)
         .execute(&mut *conn)
         .await
-        .map_err(|_| DatabaseErrorCode::ProvisioningFailed)?;
+        .map_err(|e| {
+            error!("Failed to grant privileges on database '{}' to user '{}': {}", db_name, username, e);
+            DatabaseErrorCode::ProvisioningFailed
+        })?;
 
     Ok(())
 }
+
+
 
 async fn execute_mariadb_deprovisioning(
     pool: &MySqlPool,
@@ -182,14 +204,25 @@ async fn execute_mariadb_deprovisioning(
     }
 
     let mut conn = pool.acquire().await.map_err(|_| DatabaseErrorCode::DeprovisioningFailed)?;
+    
     sqlx::query(&format!("DROP DATABASE IF EXISTS `{}`", db_name))
-        .execute(&mut *conn)
-        .await
-        .map_err(|_| DatabaseErrorCode::DeprovisioningFailed)?;
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| 
+    {
+        error!("Failed to drop database '{}': {}", db_name, e);
+        DatabaseErrorCode::DeprovisioningFailed
+    })?;
+
     sqlx::query(&format!("DROP USER IF EXISTS `{}`@'%'", username))
-        .execute(&mut *conn)
-        .await
-        .map_err(|_| DatabaseErrorCode::DeprovisioningFailed)?;
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| 
+    {
+        error!("Failed to drop user '{}': {}", username, e);
+        DatabaseErrorCode::DeprovisioningFailed
+    })?;
+
     Ok(())
 }
 
@@ -206,8 +239,17 @@ pub async fn get_database_by_owner(pool: &PgPool, owner: &str) -> Result<Option<
         })
 }
 
-pub async fn get_database_by_id_and_owner(pool: &PgPool, db_id: i32, owner: &str) -> Result<Option<Database>, AppError>
+pub async fn get_database_by_id_and_owner(pool: &PgPool, db_id: i32, owner: &str, is_admin: bool) -> Result<Option<Database>, AppError>
 {
+    if is_admin 
+    {
+        return sqlx::query_as("SELECT * FROM databases WHERE id = $1")
+            .bind(db_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| AppError::InternalServerError);
+    }
+
     sqlx::query_as("SELECT * FROM databases WHERE id = $1 AND owner_login = $2")
         .bind(db_id)
         .bind(owner)
@@ -272,14 +314,17 @@ pub async fn provision_and_link_database_tx<'a>(
     if let Err(e) = execute_mariadb_provisioning(mariadb_pool, &db_name, &username, &password).await
     {
         warn!("MariaDB provisioning failed during transaction for user '{}'. Error: {}", owner_login, e);
-        execute_mariadb_deprovisioning(mariadb_pool, &db_name, &username).await.ok();
+        if let Err(e) = execute_mariadb_deprovisioning(mariadb_pool, &db_name, &username).await 
+        {
+            error!("Failed to rollback MariaDB provisioning for user '{}': {}", owner_login, e);
+        }
         return Err(e);
     }
     
     let encrypted_password_vec = crypto_service::encrypt(&password, encryption_key)?;
     let encrypted_password = BASE64_STANDARD.encode(encrypted_password_vec);
 
-    sqlx::query(
+    let insert_result = sqlx::query(
         "INSERT INTO databases (owner_login, database_name, username, encrypted_password, project_id)
          VALUES ($1, $2, $3, $4, $5)",
     )
@@ -289,12 +334,17 @@ pub async fn provision_and_link_database_tx<'a>(
     .bind(&encrypted_password)
     .bind(project_id)
     .execute(&mut **tx)
-    .await
-    .map_err(|e|
+    .await;
+
+    if let Err(db_error) = insert_result
     {
-        error!("Failed to persist database metadata for user '{}' in transaction: {}", owner_login, e);
-        AppError::ProjectError(ProjectErrorCode::ProjectCreationFailedWithDatabaseError)
-    })?;
+        error!("Failed to persist database metadata for user '{}' in transaction: {}", owner_login, db_error);
+        if let Err(e) = execute_mariadb_deprovisioning(mariadb_pool, &db_name, &username).await 
+        {
+            error!("Failed to rollback MariaDB provisioning for user '{}': {}", owner_login, e);
+        }
+        return Err(AppError::ProjectError(ProjectErrorCode::ProjectCreationFailedWithDatabaseError));
+    }
 
     Ok(())
 }

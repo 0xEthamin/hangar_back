@@ -78,6 +78,8 @@ pub enum ProjectErrorCode
     InvalidVolumePath,
     #[error("A database operation failed during project creation.")]
     ProjectCreationFailedWithDatabaseError,
+    #[error("The specified source root directory is invalid.")]
+    InvalidSourceRootDir,
 }
 
 #[derive(Debug, Error, Serialize, PartialEq)]
@@ -117,6 +119,21 @@ impl ProjectErrorCode
             ProjectErrorCode::InvalidVolumePath => "INVALID_VOLUME_PATH",
             ProjectErrorCode::InvalidGithubUrl => "INVALID_GITHUB_URL",
             ProjectErrorCode::ProjectCreationFailedWithDatabaseError => "PROJECT_CREATION_FAILED_WITH_DATABASE_ERROR",
+            ProjectErrorCode::InvalidSourceRootDir => "INVALID_SOURCE_ROOT_DIR",
+        }
+    }
+}
+
+impl DatabaseErrorCode 
+{
+    fn as_str(&self) -> &'static str 
+    {
+        match self 
+        {
+            DatabaseErrorCode::DatabaseAlreadyExists => "DATABASE_ALREADY_EXISTS",
+            DatabaseErrorCode::ProvisioningFailed => "PROVISIONING_FAILED",
+            DatabaseErrorCode::DeprovisioningFailed => "DEPROVISIONING_FAILED",
+            DatabaseErrorCode::NotFound => "NOT_FOUND",
         }
     }
 }
@@ -176,7 +193,7 @@ impl IntoResponse for AppError
 
                 let error_json = json!(
                 {
-                    "error_code": format!("{:?}", code).to_uppercase(),
+                    "error_code": code.as_str(),
                     "message": code.to_string()
                 });
 

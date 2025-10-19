@@ -39,17 +39,12 @@ pub async fn get_down_projects_handler(
 
     for project in all_projects 
     {
-        if let Some(details) = docker_service::inspect_container_details(&state.docker_client, &project.container_name).await? 
-        {
-            if let Some(container_state) = details.state 
-            {
-                if let Some(is_running) = container_state.running 
-                {
-                    if !is_running 
-                    {
-                        if let Some(finished_at_str) = container_state.finished_at 
-                        {
-                            if let Ok(stopped_at) = OffsetDateTime::parse(&finished_at_str, &Rfc3339)
+        if let Some(details) = docker_service::inspect_container_details(&state.docker_client, &project.container_name).await?
+            && let Some(container_state) = details.state
+                && let Some(is_running) = container_state.running
+                    && !is_running
+                        && let Some(finished_at_str) = container_state.finished_at
+                            && let Ok(stopped_at) = OffsetDateTime::parse(&finished_at_str, &Rfc3339)
                             {
                                 let downtime_seconds = (now - stopped_at).as_seconds_f64() as i64;
                                 down_projects.push(DownProjectInfo 
@@ -59,11 +54,6 @@ pub async fn get_down_projects_handler(
                                     downtime_seconds,
                                 });
                             }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     down_projects.sort_by(|a, b| b.downtime_seconds.cmp(&a.downtime_seconds));
