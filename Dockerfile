@@ -20,7 +20,7 @@ RUN cargo build --release
 
 FROM alpine:latest AS runner
 
-RUN apk add --no-cache libssl3
+RUN apk add --no-cache libssl3 ca-certificates
 
 # need to match host system's docker group
 RUN addgroup -g 996 docker
@@ -29,7 +29,15 @@ RUN addgroup -g 1000 appgroup && adduser -u 1000 -S appuser -G appgroup
 
 RUN adduser appuser docker
 
-RUN mkdir -p /data/pdfs && chown -R appuser:appgroup /data
+RUN apk add --no-cache curl && \
+    curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin && \
+    grype version && \
+    apk del curl
+
+RUN grype version
+
+RUN mkdir -p /home/appuser/.cache/grype && chown -R appuser:appgroup /home/appuser
+
 WORKDIR /app
 
 COPY --from=builder /usr/src/app/target/release/hangar_back .
