@@ -1,4 +1,5 @@
 /target
 .env
+docker-compose.yml
 postgresql_data
 mariadb_data

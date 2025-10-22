@@ -170,7 +170,7 @@ pub async fn create_project_container(
     labels.insert("traefik.enable".to_string(), "true".to_string());
     labels.insert(format!("traefik.http.routers.{}.rule", project_name), format!("Host(`{}`)", hostname));
     labels.insert(format!("traefik.http.routers.{}.entrypoints", project_name), config.traefik_entrypoint.clone());
-    //labels.insert(format!("traefik.http.routers.{}.tls.certresolver", project_name), config.traefik_cert_resolver.clone());
+    labels.insert(format!("traefik.http.routers.{}.tls.certresolver", project_name), config.traefik_cert_resolver.clone());
     labels.insert(format!("traefik.http.services.{}.loadbalancer.server.port", project_name), "80".to_string());
 
     let config = ContainerCreateBody 
