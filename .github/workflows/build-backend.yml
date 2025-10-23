@@ -2,6 +2,7 @@ name: 'Build backend'
 
 on:
   workflow_dispatch:
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: garage-isep/hangar-back
@@ -36,3 +37,5 @@ jobs:
           context: .
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max

@@ -1154,7 +1154,7 @@ async fn project_control_handler(
     action: ProjectAction,
 ) -> Result<impl IntoResponse, AppError>
 {
-    let project = get_project_for_owner(&state, project_id, &claims.sub, claims.is_admin).await?;
+    let project = get_project_for_user(&state, project_id, &claims.sub, claims.is_admin).await?;
 
     validate_container_exists_for_action(&state, &project, action).await?;
 
