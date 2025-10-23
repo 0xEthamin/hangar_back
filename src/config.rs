@@ -26,6 +26,7 @@ pub struct Config
     pub traefik_cert_resolver: String,
     pub container_memory_mb: i64,
     pub container_cpu_quota: i64,
+    pub grype_enabled: bool,
     pub grype_fail_on_severity: String,
     pub db_max_connections: u32,
     pub timeout_normal: u64,
@@ -95,6 +96,15 @@ impl Config
         let traefik_entrypoint = std::env::var("DOCKER_TRAEFIK_ENTRYPOINT").map_err(|_| ConfigError::Missing("DOCKER_TRAEFIK_ENTRYPOINT".to_string()))?;
         let traefik_cert_resolver = std::env::var("DOCKER_TRAEFIK_CERTRESOLVER")
             .map_err(|_| ConfigError::Missing("DOCKER_TRAEFIK_CERTRESOLVER".to_string()))?;
+
+        let grype_enabled_str = std::env::var("GRYPE_ENABLED")
+            .map_err(|_| ConfigError::Missing("GRYPE_ENABLED".to_string()))?;
+        let grype_enabled = grype_enabled_str.parse::<bool>().map_err(|_|
+        {
+            ConfigError::Invalid("GRYPE_ENABLED".to_string(), grype_enabled_str)
+        })?;
+
+
         let grype_fail_on_severity = std::env::var("GRYPE_FAIL_ON_SEVERITY")
             .map_err(|_| ConfigError::Missing("GRYPE_FAIL_ON_SEVERITY".to_string()))?;
 
@@ -165,6 +175,7 @@ impl Config
             traefik_cert_resolver,
             container_memory_mb,
             container_cpu_quota,
+            grype_enabled,
             grype_fail_on_severity,
             db_max_connections,
             timeout_normal,

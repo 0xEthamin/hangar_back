@@ -59,6 +59,12 @@ pub async fn pull_image(docker: &Docker, image_url: &str, credentials: Option<Do
 
 pub async fn scan_image_with_grype(image_url: &str, config: &crate::config::Config) -> Result<(), AppError> 
 {
+    if !config.grype_enabled 
+    {
+        warn!("Grype scan is disabled via GRYPE_ENABLED=false. Skipping security scan for image '{}'.", image_url);
+        return Ok(());
+    }
+
     info!("Scanning image '{}' with Grype...", image_url);
 
     let mut command = Command::new("grype");

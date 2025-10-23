@@ -335,7 +335,7 @@ pub async fn update_project_image_handler(
     let user_login = &claims.sub;
     info!("User '{}' initiated blue-green image update for project ID: {}", user_login, project_id);
 
-    let project = get_project_for_owner(&state, project_id, user_login, claims.is_admin).await?;
+    let project = get_project_for_user(&state, project_id, user_login, claims.is_admin).await?;
 
     validate_project_source(&project.source, ProjectSourceType::Direct, "Image update")?;
 
@@ -373,7 +373,7 @@ pub async fn rebuild_project_handler(
     let user_login = &claims.sub;
     info!("User '{}' initiated source rebuild for project ID: {}", user_login, project_id);
 
-    let project = get_project_for_owner(&state, project_id, user_login, claims.is_admin).await?;
+    let project = get_project_for_user(&state, project_id, user_login, claims.is_admin).await?;
 
     validate_project_source(&project.source, ProjectSourceType::Github, "Source rebuild")?;
 
@@ -477,7 +477,7 @@ pub async fn update_env_vars_handler(
 
     validation_service::validate_env_vars(&payload.env_vars)?;
 
-    let project = get_project_for_owner(&state, project_id, user_login, claims.is_admin).await?;
+    let project = get_project_for_user(&state, project_id, user_login, claims.is_admin).await?;
 
     let deployment = create_blue_green_deployment_for_env_update(&state, &project);
 
@@ -1119,7 +1119,7 @@ async fn get_project_for_owner(
         .ok_or_else(||
         {
             AppError::NotFound(format!(
-                "Project with ID {} not found or you are not the owner.",
+                "Project with ID {} not found or you don't have access.",
                 project_id
             ))
         })
