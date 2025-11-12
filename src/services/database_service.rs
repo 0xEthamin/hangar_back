@@ -144,12 +144,14 @@ async fn execute_mariadb_provisioning(
     password: &str,
 ) -> Result<(), AppError> 
 {
-    if !valid_identifier(db_name) || !valid_identifier(username) {
+    if !valid_identifier(db_name) || !valid_identifier(username) 
+    {
         error!("Invalid database or username identifier: db_name='{}', username='{}'", db_name, username);
         return Err(AppError::BadRequest("Invalid identifier".into()));
     }
 
-    let mut conn = pool.acquire().await.map_err(|e| {
+    let mut conn = pool.acquire().await.map_err(|e| 
+    {
         error!("Failed to acquire MariaDB connection: {}", e);
         DatabaseErrorCode::ProvisioningFailed
     })?;
@@ -161,7 +163,8 @@ async fn execute_mariadb_provisioning(
     sqlx::query(&create_db_sql)
         .execute(&mut *conn)
         .await
-        .map_err(|e| {
+        .map_err(|e| 
+        {
             error!("Failed to create database '{}': {}", db_name, e);
             DatabaseErrorCode::ProvisioningFailed
         })?;
@@ -177,13 +180,25 @@ async fn execute_mariadb_provisioning(
             DatabaseErrorCode::ProvisioningFailed
         })?;
 
-
-    let grant_sql = format!("GRANT ALL PRIVILEGES ON `{}`.* TO `{}`@'%'", db_name, username);
+    let grant_sql = format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, CREATE TEMPORARY TABLES, LOCK TABLES ON `{}`.* TO `{}`@'%'",
+        db_name, username
+    );
     sqlx::query(&grant_sql)
         .execute(&mut *conn)
         .await
-        .map_err(|e| {
+        .map_err(|e| 
+        {
             error!("Failed to grant privileges on database '{}' to user '{}': {}", db_name, username, e);
+            DatabaseErrorCode::ProvisioningFailed
+        })?;
+
+    sqlx::query("FLUSH PRIVILEGES")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| 
+        {
+            error!("Failed to flush privileges: {}", e);
             DatabaseErrorCode::ProvisioningFailed
         })?;
 
