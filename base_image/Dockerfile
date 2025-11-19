@@ -32,7 +32,7 @@ RUN { \
     echo 'post_max_size=50M'; \
     echo 'max_execution_time=60'; \
     echo 'expose_php=Off'; \
-    echo 'display_errors=Off'; \
+    echo 'display_errors=On'; \
     } > /usr/local/etc/php/conf.d/custom.ini
 
 RUN { \
