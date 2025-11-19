@@ -76,7 +76,11 @@ RUN rm /usr/local/etc/php-fpm.d/www.conf.default
 
 EXPOSE 80
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://127.0.0.1/ || exit 1
+
+# Healthcheck disabled cause if the website return 500, the container is considered unhealthy and traefik stops routing to it.
+# Users should be informed of this 500 rather than getting a traefik 404.
+
+# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+#     CMD wget --quiet --tries=1 --spider http://127.0.0.1/ || exit 1
 
 ENTRYPOINT ["/usr/local/bin/configure-webroot.sh"]
